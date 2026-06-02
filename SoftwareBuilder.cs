@@ -1,3 +1,10 @@
+// SoftwareBuilder - Visual Python Programming Environment
+// Single-file .NET 6.0 Windows Forms Application
+// Build: dotnet new console -n SoftwareBuilder -f net6.0-windows
+// Replace Program.cs with this file, then: dotnet run
+// Icons: place .png files in a folder named "base\icons" next to the executable.
+// Icon1.ico: place in the same folder as the executable to set the window icon.
+
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -5,13 +12,12 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 
 // ──────────────────────────────────────────────
-//  PROGRAM ENTRY POINT & EMBEDDED ICON
+//  PROGRAM ENTRY POINT
 // ──────────────────────────────────────────────
 static class Program
 {
@@ -39,11 +45,11 @@ class CategoryInfo
     public BlockCategory Category;
     public string Name;
     public Color Color;
-    public string IconSymbol;
+    public string IconName; // e.g., "flow"
     public List<SubCategory> SubCategories = new();
 
-    public CategoryInfo(BlockCategory cat, string name, Color color, string icon)
-    { Category = cat; Name = name; Color = color; IconSymbol = icon; }
+    public CategoryInfo(BlockCategory cat, string name, Color color, string iconName)
+    { Category = cat; Name = name; Color = color; IconName = iconName; }
 }
 
 class SubCategory
@@ -63,7 +69,7 @@ class BlockDefinition
     public BlockCategory Category;
     public string SubCategory;
     public Color Color;
-    public string PythonTemplate; // e.g. "if {0}:\n{1}" for C-blocks
+    public string PythonTemplate;
     public string[] DefaultArgs;
     public bool IsCBlock;
 
@@ -79,13 +85,14 @@ class BlockDefinition
 // ──────────────────────────────────────────────
 //  WORKSPACE BLOCK (Placed in workspace)
 // ──────────────────────────────────────────────
-class WorkspaceBlock
+class WorkspaceBlock : ICloneable
 {
     public BlockDefinition Definition;
     public Rectangle Bounds;
-    public List<WorkspaceBlock> InnerBlocks = new(); // For C-blocks
+    public List<WorkspaceBlock> InnerBlocks = new();
     public string[] ArgValues;
     public bool IsDragging;
+    public bool IsSelected;
     public int IndentLevel;
 
     public WorkspaceBlock(BlockDefinition def, Point location)
@@ -99,15 +106,58 @@ class WorkspaceBlock
     public static Size GetBlockSize(BlockDefinition def)
     {
         int w = Math.Max(80, TextRenderer.MeasureText(def.Label, new Font("Segoe UI", 9f, FontStyle.Bold)).Width + 40);
-        if (def.Shape == BlockShape.Boolean) { w = Math.Max(w, 60); return new Size(w + 16, 26); }
-        if (def.Shape == BlockShape.Reporter) { w = Math.Max(w, 50); return new Size(w + 20, 24); }
+        if (def.Shape == BlockShape.Boolean) return new Size(Math.Max(w, 60), 26);
+        if (def.Shape == BlockShape.Reporter) return new Size(Math.Max(w, 50), 24);
         if (def.IsCBlock) return new Size(Math.Max(w, 120), 70);
         return new Size(w, 26);
+    }
+
+    public object Clone()
+    {
+        var clone = new WorkspaceBlock(Definition, Bounds.Location);
+        clone.ArgValues = (string[])ArgValues.Clone();
+        clone.Bounds = Bounds;
+        clone.IsSelected = IsSelected;
+        clone.IndentLevel = IndentLevel;
+        // InnerBlocks are not deep-cloned for simplicity
+        return clone;
     }
 }
 
 // ──────────────────────────────────────────────
-//  BLOCK STORAGE CONTROL (Draggable block in palette)
+//  UNDO / REDO MANAGER
+// ──────────────────────────────────────────────
+class UndoRedoManager
+{
+    private Stack<List<WorkspaceBlock>> undoStack = new();
+    private Stack<List<WorkspaceBlock>> redoStack = new();
+    private const int MaxSteps = 30;
+
+    public void SaveState(List<WorkspaceBlock> blocks)
+    {
+        undoStack.Push(blocks.Select(b => (WorkspaceBlock)b.Clone()).ToList());
+        redoStack.Clear();
+        if (undoStack.Count > MaxSteps)
+            undoStack = new Stack<List<WorkspaceBlock>>(undoStack.Take(MaxSteps));
+    }
+
+    public List<WorkspaceBlock> Undo(List<WorkspaceBlock> current)
+    {
+        if (undoStack.Count == 0) return null;
+        redoStack.Push(current.Select(b => (WorkspaceBlock)b.Clone()).ToList());
+        return undoStack.Pop();
+    }
+
+    public List<WorkspaceBlock> Redo(List<WorkspaceBlock> current)
+    {
+        if (redoStack.Count == 0) return null;
+        undoStack.Push(current.Select(b => (WorkspaceBlock)b.Clone()).ToList());
+        return redoStack.Pop();
+    }
+}
+
+// ──────────────────────────────────────────────
+//  BLOCK STORAGE ITEM (Palette block)
 // ──────────────────────────────────────────────
 class BlockStorageItem : Control
 {
@@ -134,19 +184,17 @@ class BlockStorageItem : Control
         Color baseColor = Definition.Color;
         if (IsHovered) baseColor = ControlPaint.Light(baseColor, 0.2f);
 
-        using var path = CreateBlockPath(r, Definition.Shape, false, false);
+        using var path = CreateBlockPath(r, Definition.Shape, Definition.IsCBlock);
         using var brush = new LinearGradientBrush(r, ControlPaint.Light(baseColor, 0.3f), ControlPaint.Dark(baseColor, 0.15f), LinearGradientMode.Vertical);
         g.FillPath(brush, path);
         using var pen = new Pen(ControlPaint.Dark(baseColor, 0.35f), 1f);
         g.DrawPath(pen, path);
-        // Highlight
         using var hlPen = new Pen(ControlPaint.Light(baseColor, 0.5f), 1f);
-        var hlPath = CreateBlockPath(new Rectangle(r.X + 1, r.Y + 1, r.Width - 2, r.Height - 4), Definition.Shape, false, false);
+        var hlPath = CreateBlockPath(new Rectangle(r.X + 1, r.Y + 1, r.Width - 2, r.Height - 4), Definition.Shape, Definition.IsCBlock);
         g.DrawPath(hlPen, hlPath);
-        hlPen.Dispose();
         hlPath.Dispose();
+        hlPen.Dispose();
 
-        // Label
         var textRect = new Rectangle(r.X + 6, r.Y + 3, r.Width - 12, r.Height - 6);
         using var textBrush = new SolidBrush(IsDarkColor(baseColor) ? Color.White : Color.Black);
         var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
@@ -166,11 +214,11 @@ class BlockStorageItem : Control
         base.OnMouseDown(e);
     }
 
-    private static GraphicsPath CreateBlockPath(Rectangle r, BlockShape shape, bool hasTopNotch, bool hasBottomNotch)
+    // Generate Scratch-style block shapes
+    private GraphicsPath CreateBlockPath(Rectangle r, BlockShape shape, bool isCBlock)
     {
         var path = new GraphicsPath();
-        int nw = 10, nh = 4; // notch dimensions
-        int rx = 6; // corner radius
+        int nw = 10, nh = 4, rx = 5;
 
         if (shape == BlockShape.Hat)
         {
@@ -183,232 +231,7 @@ class BlockStorageItem : Control
             path.AddLine(r.X + r.Width / 2, r.Bottom, r.X + r.Width / 2 - nw / 2, r.Bottom - nh);
             path.AddLine(r.X + r.Width / 2 - nw / 2, r.Bottom - nh, r.X, r.Bottom - nh);
             path.AddLine(r.X, r.Bottom - nh, r.X, r.Y + rx);
-        }
-        else if (shape == BlockShape.Boolean)
-        {
-            // Hexagonal
-            int hw = r.Width / 2, hh = r.Height / 2;
-            int tip = 8;
-            path.AddPolygon(new Point[] {
-                new(r.X + tip, r.Y), new(r.Right - tip, r.Y),
-                new(r.Right, r.Y + hh), new(r.Right - tip, r.Bottom),
-                new(r.X + tip, r.Bottom), new(r.X, r.Y + hh)
-            });
-        }
-        else if (shape == BlockShape.Reporter)
-        {
-            // Rounded pill shape
-            int rr = r.Height / 2;
-            path.AddArc(r.X, r.Y, rr * 2, rr * 2, 90, 180);
-            path.AddArc(r.Right - rr * 2, r.Y, rr * 2, rr * 2, 270, 180);
             path.CloseFigure();
-        }
-        else
-        {
-            // Stack / CBlock - notched top and/or bottom
-            int topY = r.Y;
-            if (hasTopNotch)
-            {
-                path.AddLine(r.X + r.Width / 2 - nw / 2, r.Y, r.X + r.Width / 2, r.Y - nh);
-                path.AddLine(r.X + r.Width / 2, r.Y - nh, r.X + r.Width / 2 + nw / 2, r.Y);
-                topY = r.Y;
-            }
-            else
-            {
-                path.StartFigure();
-                path.AddArc(r.X, r.Y, rx * 2, rx * 2, 180, 90);
-                path.AddArc(r.Right - rx * 2, r.Y, rx * 2, rx * 2, 270, 90);
-            }
-
-            path.AddLine(r.Right, topY + rx, r.Right, r.Bottom - nh - rx);
-            if (hasBottomNotch)
-            {
-                path.AddLine(r.Right, r.Bottom - nh, r.X + r.Width / 2 + nw / 2, r.Bottom - nh);
-                path.AddLine(r.X + r.Width / 2 + nw / 2, r.Bottom - nh, r.X + r.Width / 2, r.Bottom);
-                path.AddLine(r.X + r.Width / 2, r.Bottom, r.X + r.Width / 2 - nw / 2, r.Bottom - nh);
-                path.AddLine(r.X + r.Width / 2 - nw / 2, r.Bottom - nh, r.X, r.Bottom - nh);
-            }
-            else
-            {
-                path.AddArc(r.Right - rx * 2, r.Bottom - rx * 2, rx * 2, rx * 2, 0, 90);
-                path.AddArc(r.X, r.Bottom - rx * 2, rx * 2, rx * 2, 90, 90);
-            }
-            path.AddLine(r.X, r.Bottom - nh, r.X, topY + rx);
-            path.CloseFigure();
-        }
-        return path;
-    }
-
-    private static bool IsDarkColor(Color c) => (c.R * 0.299 + c.G * 0.587 + c.B * 0.114) < 140;
-}
-
-// ──────────────────────────────────────────────
-//  CATEGORY HEADER CONTROL
-// ──────────────────────────────────────────────
-class CategoryHeader : Control
-{
-    public CategoryInfo Info;
-    public bool Expanded = true;
-    private static readonly Font HeaderFont = new("Segoe UI", 9.5f, FontStyle.Bold);
-
-    public CategoryHeader(CategoryInfo info)
-    {
-        Info = info;
-        Height = 30;
-        Dock = DockStyle.Top;
-        Cursor = Cursors.Hand;
-        DoubleBuffered = true;
-        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        var r = ClientRectangle;
-        using var brush = new LinearGradientBrush(r, ControlPaint.Light(Info.Color, 0.25f), ControlPaint.Dark(Info.Color, 0.1f), LinearGradientMode.Vertical);
-        g.FillRectangle(brush, r);
-        using var pen = new Pen(ControlPaint.Dark(Info.Color, 0.3f), 1f);
-        g.DrawRectangle(pen, r.X, r.Y, r.Width - 1, r.Height - 1);
-
-        string arrow = Expanded ? "▼" : "▶";
-        using var textBrush = new SolidBrush(Color.White);
-        g.DrawString($"{arrow}  {Info.IconSymbol}  {Info.Name}", HeaderFont, textBrush, new PointF(8, 5));
-    }
-
-    protected override void OnClick(EventArgs e)
-    {
-        Expanded = !Expanded;
-        var parent = Parent as FlowLayoutPanel;
-        if (parent != null)
-        {
-            // Toggle visibility of subcategory headers and block items that follow
-            bool hide = false;
-            foreach (Control c in parent.Controls)
-            {
-                if (c == this) { hide = !Expanded; continue; }
-                if (c is CategoryHeader) { hide = false; continue; }
-                c.Visible = !hide;
-            }
-        }
-        Invalidate();
-        base.OnClick(e);
-    }
-}
-
-// ──────────────────────────────────────────────
-//  SUB-CATEGORY HEADER
-// ──────────────────────────────────────────────
-class SubCategoryHeader : Control
-{
-    public string Title;
-    private static readonly Font SubFont = new("Segoe UI", 8.5f, FontStyle.Regular);
-
-    public SubCategoryHeader(string title)
-    {
-        Title = title;
-        Height = 22;
-        Dock = DockStyle.Top;
-        BackColor = Color.FromArgb(0x5C, 0x5C, 0x5C);
-        ForeColor = Color.White;
-        DoubleBuffered = true;
-        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var brush = new SolidBrush(BackColor);
-        g.FillRectangle(brush, ClientRectangle);
-        g.DrawString($"  {Title}", SubFont, Brushes.White, new PointF(2, 3));
-    }
-}
-
-// ──────────────────────────────────────────────
-//  WORKSPACE PANEL (Center - where blocks are placed)
-// ──────────────────────────────────────────────
-class WorkspacePanel : Panel
-{
-    public List<WorkspaceBlock> Blocks = new();
-    private Point dragOffset;
-    private WorkspaceBlock draggingBlock;
-    private int gridSize = 8;
-
-    public WorkspacePanel()
-    {
-        DoubleBuffered = true;
-        AllowDrop = true;
-        BackColor = Color.FromArgb(0xDD, 0xEE, 0xDE);
-        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = TextRenderingHint.AntiAlias;
-
-        // Grid
-        using var gridPen = new Pen(Color.FromArgb(200, 210, 200), 0.5f);
-        for (int x = 0; x < Width; x += gridSize * 3)
-            g.DrawLine(gridPen, x, 0, x, Height);
-        for (int y = 0; y < Height; y += gridSize * 3)
-            g.DrawLine(gridPen, 0, y, Width, y);
-
-        // Draw placed blocks
-        foreach (var block in Blocks)
-        {
-            if (block == draggingBlock) continue;
-            DrawWorkspaceBlock(g, block);
-        }
-        if (draggingBlock != null)
-            DrawWorkspaceBlock(g, draggingBlock);
-    }
-
-    private void DrawWorkspaceBlock(Graphics g, WorkspaceBlock block)
-    {
-        var r = block.Bounds;
-        Color c = block.Definition.Color;
-        if (block.IsDragging) c = Color.FromArgb(200, c);
-
-        using var path = CreateWorkspaceBlockPath(r, block.Definition.Shape, block.Definition.IsCBlock);
-        using var fill = new LinearGradientBrush(r, ControlPaint.Light(c, 0.35f), ControlPaint.Dark(c, 0.12f), LinearGradientMode.Vertical);
-        g.FillPath(fill, path);
-        using var outline = new Pen(ControlPaint.Dark(c, 0.4f), 1.2f);
-        g.DrawPath(outline, path);
-        // inner highlight
-        using var hl = new Pen(ControlPaint.Light(c, 0.55f), 0.8f);
-        var innerR = new Rectangle(r.X + 2, r.Y + 2, r.Width - 4, r.Height - 4);
-        using var innerPath = CreateWorkspaceBlockPath(innerR, block.Definition.Shape, block.Definition.IsCBlock);
-        g.DrawPath(hl, innerPath);
-
-        // Label
-        using var textBrush = new SolidBrush(IsDarkColor(c) ? Color.White : Color.Black);
-        var font = new Font("Segoe UI", 9f, FontStyle.Bold);
-        var textRect = block.Definition.IsCBlock
-            ? new Rectangle(r.X + 6, r.Y + 3, r.Width - 12, 18)
-            : new Rectangle(r.X + 6, r.Y + 2, r.Width - 12, r.Height - 4);
-        var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-        g.DrawString(block.Definition.Label, font, textBrush, textRect, fmt);
-        font.Dispose();
-    }
-
-    private GraphicsPath CreateWorkspaceBlockPath(Rectangle r, BlockShape shape, bool isCBlock)
-    {
-        var path = new GraphicsPath();
-        int nw = 10, nh = 4, rx = 5;
-
-        if (shape == BlockShape.Hat)
-        {
-            path.AddArc(r.X, r.Y, rx * 2, rx * 2, 180, 90);
-            path.AddArc(r.Right - rx * 2, r.Y, rx * 2, rx * 2, 270, 90);
-            path.AddLine(r.Right, r.Y + rx, r.Right, r.Bottom - nh);
-            path.AddLine(r.Right, r.Bottom - nh, r.X + r.Width / 2 + nw / 2, r.Bottom - nh);
-            path.AddLine(r.X + r.Width / 2 + nw / 2, r.Bottom - nh, r.X + r.Width / 2, r.Bottom);
-            path.AddLine(r.X + r.Width / 2, r.Bottom, r.X + r.Width / 2 - nw / 2, r.Bottom - nh);
-            path.AddLine(r.X + r.Width / 2 - nw / 2, r.Bottom - nh, r.X, r.Bottom - nh);
-            path.AddLine(r.X, r.Bottom - nh, r.X, r.Y + rx);
         }
         else if (shape == BlockShape.Boolean)
         {
@@ -428,7 +251,7 @@ class WorkspacePanel : Panel
         }
         else if (isCBlock)
         {
-            // C-block: notched top, extended body with inner cavity, notched bottom
+            // C-block with notch top, inner cavity, notch bottom
             path.AddLine(r.X + r.Width / 2 - nw / 2, r.Y, r.X + r.Width / 2, r.Y - nh);
             path.AddLine(r.X + r.Width / 2, r.Y - nh, r.X + r.Width / 2 + nw / 2, r.Y);
             path.AddLine(r.Right - rx, r.Y, r.Right, r.Y + rx);
@@ -438,7 +261,6 @@ class WorkspacePanel : Panel
             path.AddLine(r.X + r.Width / 2, r.Bottom, r.X + r.Width / 2 - nw / 2, r.Bottom - nh);
             path.AddLine(r.X + r.Width / 2 - nw / 2, r.Bottom - nh, r.X + rx, r.Bottom - nh);
             path.AddLine(r.X, r.Bottom - nh - rx, r.X + rx, r.Bottom - nh - rx * 2);
-            // inner cavity (go back up)
             path.AddLine(r.X + rx, r.Bottom - nh - rx * 2, r.X + rx, r.Y + 20);
             path.AddLine(r.X + rx, r.Y + 20, r.Right - rx, r.Y + 20);
             path.AddLine(r.Right - rx, r.Y + 20, r.Right - rx, r.Bottom - nh - rx * 2);
@@ -463,6 +285,345 @@ class WorkspacePanel : Panel
         return path;
     }
 
+    private static bool IsDarkColor(Color c) => (c.R * 0.299 + c.G * 0.587 + c.B * 0.114) < 140;
+}
+
+// ──────────────────────────────────────────────
+//  SUB-CATEGORY ROUND LABEL
+// ──────────────────────────────────────────────
+class RoundLabel : Control
+{
+    public string Title;
+    private static readonly Font SubFont = new("Segoe UI", 8.5f, FontStyle.Regular);
+
+    public RoundLabel(string title)
+    {
+        Title = title;
+        Height = 22;
+        Width = 120; // will be auto-sized later
+        DoubleBuffered = true;
+        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var r = new Rectangle(0, 2, Width - 1, Height - 4);
+        using var path = new GraphicsPath();
+        int radius = r.Height / 2;
+        path.AddArc(r.X, r.Y, radius * 2, radius * 2, 90, 180);
+        path.AddArc(r.Right - radius * 2, r.Y, radius * 2, radius * 2, 270, 180);
+        path.CloseFigure();
+        using var brush = new SolidBrush(Color.FromArgb(0x5C, 0x5C, 0x5C));
+        g.FillPath(brush, path);
+        using var textBrush = new SolidBrush(Color.White);
+        var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        g.DrawString(Title, SubFont, textBrush, new Rectangle(r.X, r.Y, r.Width, r.Height), fmt);
+    }
+}
+
+// ──────────────────────────────────────────────
+//  CATEGORY BUTTON (3x4 grid)
+// ──────────────────────────────────────────────
+class CategoryButton : Control
+{
+    public CategoryInfo Info;
+    public bool IsSelected;
+    private Image icon;
+    private static readonly Font ButtonFont = new("Segoe UI", 7.5f, FontStyle.Bold);
+
+    public CategoryButton(CategoryInfo info)
+    {
+        Info = info;
+        Height = 52;
+        Width = 100;
+        Cursor = Cursors.Hand;
+        DoubleBuffered = true;
+        LoadIcon();
+        SetStyle(ControlStyles.Selectable | ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+    }
+
+    private void LoadIcon()
+    {
+        try
+        {
+            string basePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "base", "icons");
+            string file = Path.Combine(basePath, Info.IconName + ".png");
+            if (File.Exists(file))
+                icon = Image.FromFile(file);
+        }
+        catch { /* fallback */ }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var r = ClientRectangle;
+        r.Inflate(-2, -2);
+        Color back = IsSelected ? ControlPaint.Dark(Info.Color, 0.3f) : Info.Color;
+        using var brush = new LinearGradientBrush(r, ControlPaint.Light(back, 0.2f), ControlPaint.Dark(back, 0.1f), LinearGradientMode.Vertical);
+        using var pen = new Pen(ControlPaint.Dark(back, 0.4f), 1f);
+        g.FillRectangle(brush, r);
+        g.DrawRectangle(pen, r);
+
+        int iconSize = 20;
+        if (icon != null)
+            g.DrawImage(icon, new Rectangle(r.X + (r.Width - iconSize) / 2, r.Y + 4, iconSize, iconSize));
+        else
+        {
+            // Fallback: draw two-letter abbreviation
+            using var textBrush = new SolidBrush(Color.White);
+            var fallbackFont = new Font("Segoe UI", 9f, FontStyle.Bold);
+            string abbrev = Info.Name.Length >= 2 ? Info.Name.Substring(0, 2).ToUpper() : Info.Name;
+            g.DrawString(abbrev, fallbackFont, textBrush, new Point(r.X + (r.Width - 16) / 2, r.Y + 4));
+            fallbackFont.Dispose();
+        }
+        using var textBrush2 = new SolidBrush(Color.White);
+        g.DrawString(Info.Name, ButtonFont, textBrush2, new Rectangle(r.X, r.Y + 26, r.Width, 20), new StringFormat { Alignment = StringAlignment.Center });
+    }
+
+    protected override void OnClick(EventArgs e)
+    {
+        var parent = Parent as TableLayoutPanel;
+        if (parent != null)
+        {
+            foreach (Control c in parent.Controls)
+                if (c is CategoryButton cb) cb.IsSelected = false;
+            IsSelected = true;
+            // Trigger main form to update sub-categories
+            ((MainForm)FindForm())?.OnCategorySelected(Info);
+        }
+        Invalidate();
+        base.OnClick(e);
+    }
+}
+
+// ──────────────────────────────────────────────
+//  WORKSPACE PANEL (Center)
+// ──────────────────────────────────────────────
+class WorkspacePanel : Panel
+{
+    public List<WorkspaceBlock> Blocks = new();
+    public UndoRedoManager UndoRedo = new();
+    public WorkspaceBlock ClipboardBlock;
+    private Point dragOffset;
+    private WorkspaceBlock draggingBlock;
+    private int gridSize = 8;
+    private bool selecting;
+    private Point selectStart, selectEnd;
+    private List<WorkspaceBlock> selectedBlocks = new();
+    private ContextMenuStrip contextMenu;
+
+    public WorkspacePanel()
+    {
+        DoubleBuffered = true;
+        AllowDrop = true;
+        BackColor = Color.FromArgb(0xDD, 0xEE, 0xDE);
+        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
+        InitializeContextMenu();
+    }
+
+    private void InitializeContextMenu()
+    {
+        contextMenu = new ContextMenuStrip();
+        var undoItem = new ToolStripMenuItem("Undo", null, (s, e) => Undo());
+        var redoItem = new ToolStripMenuItem("Redo", null, (s, e) => Redo());
+        var copyItem = new ToolStripMenuItem("Copy", null, (s, e) => CopySelected());
+        var pasteItem = new ToolStripMenuItem("Paste", null, (s, e) => PasteFromClipboard());
+        var pasteBlockItem = new ToolStripMenuItem("Paste a Block", null, (s, e) => PasteBlock());
+        var arrangeItem = new ToolStripMenuItem("Arrange Blocks", null, (s, e) => ArrangeBlocks());
+        contextMenu.Items.AddRange(new ToolStripItem[] { undoItem, redoItem, new ToolStripSeparator(), copyItem, pasteItem, pasteBlockItem, new ToolStripSeparator(), arrangeItem });
+    }
+
+    public void SaveUndoState()
+    {
+        UndoRedo.SaveState(Blocks);
+    }
+
+    private void Undo()
+    {
+        var restored = UndoRedo.Undo(Blocks);
+        if (restored != null) { Blocks = restored; Invalidate(); TriggerCodeUpdate(); }
+    }
+
+    private void Redo()
+    {
+        var restored = UndoRedo.Redo(Blocks);
+        if (restored != null) { Blocks = restored; Invalidate(); TriggerCodeUpdate(); }
+    }
+
+    private void CopySelected()
+    {
+        if (selectedBlocks.Count > 0)
+            ClipboardBlock = (WorkspaceBlock)selectedBlocks[0].Clone();
+    }
+
+    private void PasteFromClipboard()
+    {
+        if (ClipboardBlock == null) return;
+        SaveUndoState();
+        var newBlock = (WorkspaceBlock)ClipboardBlock.Clone();
+        newBlock.Bounds = new Rectangle(new Point(ClipboardBlock.Bounds.X + 20, ClipboardBlock.Bounds.Y + 20), newBlock.Bounds.Size);
+        Blocks.Add(newBlock);
+        Invalidate();
+        TriggerCodeUpdate();
+    }
+
+    private void PasteBlock()
+    {
+        // Paste generic block? For simplicity, same as Paste but with user selection later.
+        PasteFromClipboard();
+    }
+
+    public void ArrangeBlocks()
+    {
+        SaveUndoState();
+        int y = 10;
+        int x = 10;
+        foreach (var b in Blocks.OrderBy(b => b.Bounds.Y))
+        {
+            b.Bounds = new Rectangle(new Point(x, y), b.Bounds.Size);
+            y += b.Bounds.Height + 4;
+        }
+        Invalidate();
+        TriggerCodeUpdate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = TextRenderingHint.AntiAlias;
+
+        using var gridPen = new Pen(Color.FromArgb(200, 210, 200), 0.5f);
+        for (int x = 0; x < Width; x += gridSize * 3)
+            g.DrawLine(gridPen, x, 0, x, Height);
+        for (int y = 0; y < Height; y += gridSize * 3)
+            g.DrawLine(gridPen, 0, y, Width, y);
+
+        foreach (var block in Blocks)
+        {
+            if (block == draggingBlock) continue;
+            DrawWorkspaceBlock(g, block);
+        }
+        if (draggingBlock != null)
+            DrawWorkspaceBlock(g, draggingBlock);
+
+        // Selection rectangle
+        if (selecting)
+        {
+            var rect = GetSelectionRectangle();
+            using var selPen = new Pen(Color.DodgerBlue, 2f) { DashStyle = DashStyle.Dash };
+            g.DrawRectangle(selPen, rect);
+        }
+    }
+
+    private void DrawWorkspaceBlock(Graphics g, WorkspaceBlock block)
+    {
+        var r = block.Bounds;
+        Color c = block.Definition.Color;
+        if (block.IsDragging) c = Color.FromArgb(200, c);
+        if (block.IsSelected) c = ControlPaint.Light(c, 0.4f);
+
+        using var path = CreateWorkspaceBlockPath(r, block.Definition.Shape, block.Definition.IsCBlock);
+        using var fill = new LinearGradientBrush(r, ControlPaint.Light(c, 0.35f), ControlPaint.Dark(c, 0.12f), LinearGradientMode.Vertical);
+        g.FillPath(fill, path);
+        using var outline = new Pen(ControlPaint.Dark(c, 0.4f), block.IsSelected ? 2.5f : 1.2f);
+        g.DrawPath(outline, path);
+        using var hl = new Pen(ControlPaint.Light(c, 0.55f), 0.8f);
+        var innerR = new Rectangle(r.X + 2, r.Y + 2, r.Width - 4, r.Height - 4);
+        using var innerPath = CreateWorkspaceBlockPath(innerR, block.Definition.Shape, block.Definition.IsCBlock);
+        g.DrawPath(hl, innerPath);
+
+        using var textBrush = new SolidBrush(IsDarkColor(c) ? Color.White : Color.Black);
+        var font = new Font("Segoe UI", 9f, FontStyle.Bold);
+        var textRect = block.Definition.IsCBlock
+            ? new Rectangle(r.X + 6, r.Y + 3, r.Width - 12, 18)
+            : new Rectangle(r.X + 6, r.Y + 2, r.Width - 12, r.Height - 4);
+        var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        g.DrawString(block.Definition.Label, font, textBrush, textRect, fmt);
+        font.Dispose();
+    }
+
+    private GraphicsPath CreateWorkspaceBlockPath(Rectangle r, BlockShape shape, bool isCBlock)
+    {
+        // Same logic as BlockStorageItem.CreateBlockPath but adapted for workspace scale
+        var path = new GraphicsPath();
+        int nw = 10, nh = 4, rx = 5;
+
+        if (shape == BlockShape.Hat)
+        {
+            path.AddArc(r.X, r.Y, rx * 2, rx * 2, 180, 90);
+            path.AddArc(r.Right - rx * 2, r.Y, rx * 2, rx * 2, 270, 90);
+            path.AddLine(r.Right, r.Y + rx, r.Right, r.Bottom - nh);
+            path.AddLine(r.Right, r.Bottom - nh, r.X + r.Width / 2 + nw / 2, r.Bottom - nh);
+            path.AddLine(r.X + r.Width / 2 + nw / 2, r.Bottom - nh, r.X + r.Width / 2, r.Bottom);
+            path.AddLine(r.X + r.Width / 2, r.Bottom, r.X + r.Width / 2 - nw / 2, r.Bottom - nh);
+            path.AddLine(r.X + r.Width / 2 - nw / 2, r.Bottom - nh, r.X, r.Bottom - nh);
+            path.AddLine(r.X, r.Bottom - nh, r.X, r.Y + rx);
+            path.CloseFigure();
+        }
+        else if (shape == BlockShape.Boolean)
+        {
+            int tip = 8, hh = r.Height / 2;
+            path.AddPolygon(new Point[] {
+                new(r.X + tip, r.Y), new(r.Right - tip, r.Y),
+                new(r.Right, r.Y + hh), new(r.Right - tip, r.Bottom),
+                new(r.X + tip, r.Bottom), new(r.X, r.Y + hh)
+            });
+        }
+        else if (shape == BlockShape.Reporter)
+        {
+            int rr = r.Height / 2;
+            path.AddArc(r.X, r.Y, rr * 2, rr * 2, 90, 180);
+            path.AddArc(r.Right - rr * 2, r.Y, rr * 2, rr * 2, 270, 180);
+            path.CloseFigure();
+        }
+        else if (isCBlock)
+        {
+            path.AddLine(r.X + r.Width / 2 - nw / 2, r.Y, r.X + r.Width / 2, r.Y - nh);
+            path.AddLine(r.X + r.Width / 2, r.Y - nh, r.X + r.Width / 2 + nw / 2, r.Y);
+            path.AddLine(r.Right - rx, r.Y, r.Right, r.Y + rx);
+            path.AddLine(r.Right, r.Bottom - rx - nh, r.Right - rx, r.Bottom - nh);
+            path.AddLine(r.Right - rx, r.Bottom - nh, r.X + r.Width / 2 + nw / 2, r.Bottom - nh);
+            path.AddLine(r.X + r.Width / 2 + nw / 2, r.Bottom - nh, r.X + r.Width / 2, r.Bottom);
+            path.AddLine(r.X + r.Width / 2, r.Bottom, r.X + r.Width / 2 - nw / 2, r.Bottom - nh);
+            path.AddLine(r.X + r.Width / 2 - nw / 2, r.Bottom - nh, r.X + rx, r.Bottom - nh);
+            path.AddLine(r.X, r.Bottom - nh - rx, r.X + rx, r.Bottom - nh - rx * 2);
+            path.AddLine(r.X + rx, r.Bottom - nh - rx * 2, r.X + rx, r.Y + 20);
+            path.AddLine(r.X + rx, r.Y + 20, r.Right - rx, r.Y + 20);
+            path.AddLine(r.Right - rx, r.Y + 20, r.Right - rx, r.Bottom - nh - rx * 2);
+            path.AddLine(r.Right - rx, r.Bottom - nh - rx * 2, r.Right, r.Bottom - nh - rx);
+            path.CloseFigure();
+        }
+        else
+        {
+            path.AddLine(r.X + r.Width / 2 - nw / 2, r.Y, r.X + r.Width / 2, r.Y - nh);
+            path.AddLine(r.X + r.Width / 2, r.Y - nh, r.X + r.Width / 2 + nw / 2, r.Y);
+            path.AddLine(r.Right - rx, r.Y, r.Right, r.Y + rx);
+            path.AddLine(r.Right, r.Bottom - rx - nh, r.Right - rx, r.Bottom - nh);
+            path.AddLine(r.Right - rx, r.Bottom - nh, r.X + r.Width / 2 + nw / 2, r.Bottom - nh);
+            path.AddLine(r.X + r.Width / 2 + nw / 2, r.Bottom - nh, r.X + r.Width / 2, r.Bottom);
+            path.AddLine(r.X + r.Width / 2, r.Bottom, r.X + r.Width / 2 - nw / 2, r.Bottom - nh);
+            path.AddLine(r.X + r.Width / 2 - nw / 2, r.Bottom - nh, r.X + rx, r.Bottom - nh);
+            path.AddLine(r.X, r.Bottom - nh - rx, r.X, r.Y + rx);
+            path.AddLine(r.X, r.Y + rx, r.X + rx, r.Y);
+            path.CloseFigure();
+        }
+        return path;
+    }
+
+    private Rectangle GetSelectionRectangle()
+    {
+        return new Rectangle(
+            Math.Min(selectStart.X, selectEnd.X),
+            Math.Min(selectStart.Y, selectEnd.Y),
+            Math.Abs(selectStart.X - selectEnd.X),
+            Math.Abs(selectStart.Y - selectEnd.Y));
+    }
+
     protected override void OnDragOver(DragEventArgs e)
     {
         if (e.Data.GetDataPresent(typeof(WorkspaceBlock)))
@@ -475,6 +636,7 @@ class WorkspacePanel : Panel
                 draggingBlock = new WorkspaceBlock(draggingBlock.Definition, pt);
                 draggingBlock.IsDragging = true;
                 Blocks.Add(draggingBlock);
+                SaveUndoState();
             }
             draggingBlock.Bounds = new Rectangle(
                 new Point(pt.X - draggingBlock.Bounds.Width / 2, pt.Y - draggingBlock.Bounds.Height / 2),
@@ -489,14 +651,12 @@ class WorkspacePanel : Panel
         if (draggingBlock != null)
         {
             draggingBlock.IsDragging = false;
-            // Snap to grid
             var b = draggingBlock.Bounds;
             b.X = (b.X / (gridSize * 3)) * (gridSize * 3);
             b.Y = (b.Y / (gridSize * 3)) * (gridSize * 3);
             draggingBlock.Bounds = b;
             var final = draggingBlock;
             draggingBlock = null;
-            // Replace the temp block with final positioned one
             Blocks[Blocks.Count - 1] = final;
             Invalidate();
             TriggerCodeUpdate();
@@ -517,17 +677,44 @@ class WorkspacePanel : Panel
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
-        // Check if clicking on an existing block for repositioning
-        for (int i = Blocks.Count - 1; i >= 0; i--)
+        if (e.Button == MouseButtons.Left)
         {
-            if (Blocks[i].Bounds.Contains(e.Location))
+            // Check if clicking on block for dragging
+            for (int i = Blocks.Count - 1; i >= 0; i--)
             {
-                draggingBlock = Blocks[i];
-                dragOffset = new Point(e.X - Blocks[i].Bounds.X, e.Y - Blocks[i].Bounds.Y);
-                draggingBlock.IsDragging = true;
-                Invalidate();
-                return;
+                if (Blocks[i].Bounds.Contains(e.Location))
+                {
+                    // Toggle selection if Ctrl held
+                    if (ModifierKeys.HasFlag(Keys.Control))
+                    {
+                        Blocks[i].IsSelected = !Blocks[i].IsSelected;
+                        Invalidate();
+                        return;
+                    }
+                    draggingBlock = Blocks[i];
+                    dragOffset = new Point(e.X - Blocks[i].Bounds.X, e.Y - Blocks[i].Bounds.Y);
+                    draggingBlock.IsDragging = true;
+                    if (!Blocks[i].IsSelected)
+                    {
+                        // Clear selection and select this one
+                        DeselectAll();
+                        Blocks[i].IsSelected = true;
+                    }
+                    Invalidate();
+                    return;
+                }
             }
+            // Start selection rectangle
+            selecting = true;
+            selectStart = e.Location;
+            selectEnd = e.Location;
+            DeselectAll();
+            Invalidate();
+        }
+        else if (e.Button == MouseButtons.Right)
+        {
+            // Right-click context menu
+            contextMenu.Show(this, e.Location);
         }
         base.OnMouseDown(e);
     }
@@ -542,6 +729,11 @@ class WorkspacePanel : Panel
             draggingBlock.Bounds = b;
             Invalidate();
         }
+        else if (selecting && e.Button == MouseButtons.Left)
+        {
+            selectEnd = e.Location;
+            Invalidate();
+        }
         base.OnMouseMove(e);
     }
 
@@ -554,11 +746,29 @@ class WorkspacePanel : Panel
             b.X = (b.X / (gridSize * 3)) * (gridSize * 3);
             b.Y = (b.Y / (gridSize * 3)) * (gridSize * 3);
             draggingBlock.Bounds = b;
+            SaveUndoState();
             draggingBlock = null;
             Invalidate();
             TriggerCodeUpdate();
         }
+        if (selecting)
+        {
+            selecting = false;
+            // Select blocks within selection rectangle
+            var rect = GetSelectionRectangle();
+            if (rect.Width > 5 && rect.Height > 5)
+            {
+                foreach (var b in Blocks)
+                    b.IsSelected = rect.IntersectsWith(b.Bounds);
+                Invalidate();
+            }
+        }
         base.OnMouseUp(e);
+    }
+
+    private void DeselectAll()
+    {
+        foreach (var b in Blocks) b.IsSelected = false;
     }
 
     public event Action CodeChanged;
@@ -568,6 +778,7 @@ class WorkspacePanel : Panel
 
     public void ClearAll()
     {
+        SaveUndoState();
         Blocks.Clear();
         Invalidate();
         TriggerCodeUpdate();
@@ -576,30 +787,22 @@ class WorkspacePanel : Panel
     public string GeneratePython()
     {
         if (Blocks.Count == 0) return "# Drag blocks here to build your Python program\n";
-        // Sort blocks by Y then X
         var sorted = Blocks.OrderBy(b => b.Bounds.Y).ThenBy(b => b.Bounds.X).ToList();
         var sb = new StringBuilder();
         int lastY = -1;
         foreach (var block in sorted)
         {
             if (lastY >= 0 && block.Bounds.Y > lastY + 30)
-                sb.AppendLine(); // blank line between groups
+                sb.AppendLine();
             string py = block.Definition.PythonTemplate;
-            // Replace placeholders
             for (int i = 0; i < block.ArgValues.Length; i++)
-            {
                 py = py.Replace("{" + i + "}", block.ArgValues[i]);
-            }
             if (block.Definition.IsCBlock)
             {
-                // Add indented pass/body
                 sb.AppendLine(py);
-                sb.AppendLine("    pass  # Placeholder for inner blocks");
+                sb.AppendLine("    pass");
             }
-            else
-            {
-                sb.AppendLine(py);
-            }
+            else sb.AppendLine(py);
             lastY = block.Bounds.Bottom;
         }
         return sb.ToString();
@@ -612,57 +815,61 @@ class WorkspacePanel : Panel
 class MainForm : Form
 {
     private Panel topPanel, bottomPanel;
-    private FlowLayoutPanel blockStoragePanel;
+    private TextBox searchBox;
+    private TableLayoutPanel categoryGrid;
+    private FlowLayoutPanel subCategoryPanel;
     private WorkspacePanel workspacePanel;
     private RichTextBox pythonCodeBox;
     private Label statusLabel;
     private Button runButton, clearButton, copyButton;
     private List<CategoryInfo> categories;
+    private CategoryInfo selectedCategory;
     private TableLayoutPanel mainLayout;
 
     public MainForm()
     {
-        Text = "StencylPy – Visual Python Programming";
-        Size = new Size(1280, 800);
-        MinimumSize = new Size(960, 600);
+        Text = "SoftwareBuilder – Visual Python Programming";
+        Size = new Size(1400, 820);
+        MinimumSize = new Size(1000, 650);
         BackColor = Color.FromArgb(0xDD, 0xEE, 0xDE);
-        SetIcon();
+        SetAppIcon();
         InitializeCategories();
         BuildUI();
         CenterToScreen();
     }
 
-    private void SetIcon()
+    private void SetAppIcon()
     {
         try
         {
-            // Generate a simple programmatic icon
-            using var bmp = new Bitmap(32, 32);
-            using var g = Graphics.FromImage(bmp);
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.Clear(Color.FromArgb(0x4A, 0x6C, 0xD4));
-            using var brush = new LinearGradientBrush(new Rectangle(0, 0, 32, 32), Color.FromArgb(0x5B, 0x8D, 0xF5), Color.FromArgb(0x3A, 0x5C, 0xC4), LinearGradientMode.Vertical);
-            g.FillRectangle(brush, 0, 0, 32, 32);
-            // Draw "Py" text
-            using var font = new Font("Consolas", 14f, FontStyle.Bold);
-            using var textBrush = new SolidBrush(Color.White);
-            g.DrawString("Py", font, textBrush, new PointF(2, 4));
-            // Draw small blocks
-            g.FillRectangle(Brushes.White, 18, 6, 10, 4);
-            g.FillRectangle(Brushes.White, 18, 14, 10, 4);
-            g.FillRectangle(Brushes.White, 18, 22, 6, 4);
-            var iconHandle = bmp.GetHicon();
-            Icon = Icon.FromHandle(iconHandle);
+            string iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Icon1.ico");
+            if (File.Exists(iconPath))
+            {
+                Icon = new Icon(iconPath);
+            }
+            else
+            {
+                // Fallback generated icon
+                using var bmp = new Bitmap(32, 32);
+                using var g = Graphics.FromImage(bmp);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.FromArgb(0x4A, 0x6C, 0xD4));
+                using var brush = new LinearGradientBrush(new Rectangle(0, 0, 32, 32), Color.FromArgb(0x5B, 0x8D, 0xF5), Color.FromArgb(0x3A, 0x5C, 0xC4), LinearGradientMode.Vertical);
+                g.FillRectangle(brush, 0, 0, 32, 32);
+                using var font = new Font("Consolas", 14f, FontStyle.Bold);
+                g.DrawString("SB", font, Brushes.White, new PointF(2, 4));
+                var iconHandle = bmp.GetHicon();
+                Icon = Icon.FromHandle(iconHandle);
+            }
         }
-        catch { /* Fallback - no icon */ }
+        catch { /* use default */ }
     }
 
     private void InitializeCategories()
     {
         categories = new List<CategoryInfo>
         {
-            new(BlockCategory.Flow, "FLOW", Color.FromArgb(0xE1, 0xA9, 0x1A), "↔")
-            {
+            new(BlockCategory.Flow, "FLOW", Color.FromArgb(0xE1, 0xA9, 0x1A), "flow") {
                 SubCategories = {
                     new("Execution") { Blocks = {
                         new("pass", BlockShape.Stack, BlockCategory.Flow, "Execution", Color.FromArgb(0xE1, 0xA9, 0x1A), "pass"),
@@ -695,8 +902,7 @@ class MainForm : Form
                     }}
                 }
             },
-            new(BlockCategory.Variables, "VARIABLES", Color.FromArgb(0x4A, 0x6C, 0xD4), "📦")
-            {
+            new(BlockCategory.Variables, "VARIABLES", Color.FromArgb(0x4A, 0x6C, 0xD4), "variables") {
                 SubCategories = {
                     new("Assignment") { Blocks = {
                         new("=", BlockShape.Stack, BlockCategory.Variables, "Assignment", Color.FromArgb(0x4A, 0x6C, 0xD4), "{0} = {1}", false, new[]{"x", "0"}),
@@ -726,8 +932,7 @@ class MainForm : Form
                     }}
                 }
             },
-            new(BlockCategory.Functions, "FUNCTIONS", Color.FromArgb(0x8A, 0x55, 0xD7), "⚡")
-            {
+            new(BlockCategory.Functions, "FUNCTIONS", Color.FromArgb(0x8A, 0x55, 0xD7), "functions") {
                 SubCategories = {
                     new("Definition") { Blocks = {
                         new("def", BlockShape.Hat, BlockCategory.Functions, "Definition", Color.FromArgb(0x8A, 0x55, 0xD7), "def {0}({1}):", true, new[]{"my_func", ""}),
@@ -752,8 +957,7 @@ class MainForm : Form
                     }}
                 }
             },
-            new(BlockCategory.Objects, "OBJECTS", Color.FromArgb(0x63, 0x2D, 0x99), "🧠")
-            {
+            new(BlockCategory.Objects, "OBJECTS", Color.FromArgb(0x63, 0x2D, 0x99), "objects") {
                 SubCategories = {
                     new("Classes") { Blocks = {
                         new("class", BlockShape.Hat, BlockCategory.Objects, "Classes", Color.FromArgb(0x63, 0x2D, 0x99), "class {0}:", true, new[]{"MyClass"}),
@@ -775,8 +979,7 @@ class MainForm : Form
                     }}
                 }
             },
-            new(BlockCategory.Data, "DATA", Color.FromArgb(0x5C, 0xB7, 0x12), "📚")
-            {
+            new(BlockCategory.Data, "DATA", Color.FromArgb(0x5C, 0xB7, 0x12), "data") {
                 SubCategories = {
                     new("Lists") { Blocks = {
                         new("append()", BlockShape.Stack, BlockCategory.Data, "Lists", Color.FromArgb(0x5C, 0xB7, 0x12), "{0}.append({1})", false, new[]{"lst", "item"}),
@@ -807,8 +1010,7 @@ class MainForm : Form
                     }}
                 }
             },
-            new(BlockCategory.Text, "TEXT", Color.FromArgb(0xEE, 0x7D, 0x16), "💬")
-            {
+            new(BlockCategory.Text, "TEXT", Color.FromArgb(0xEE, 0x7D, 0x16), "text") {
                 SubCategories = {
                     new("Creation") { Blocks = {
                         new("str()", BlockShape.Reporter, BlockCategory.Text, "Creation", Color.FromArgb(0xEE, 0x7D, 0x16), "str({0})", false, new[]{"0"}),
@@ -835,8 +1037,7 @@ class MainForm : Form
                     }}
                 }
             },
-            new(BlockCategory.Math, "MATH", Color.FromArgb(0x2C, 0xA5, 0xE2), "∑")
-            {
+            new(BlockCategory.Math, "MATH", Color.FromArgb(0x2C, 0xA5, 0xE2), "math") {
                 SubCategories = {
                     new("Arithmetic") { Blocks = {
                         new("+", BlockShape.Reporter, BlockCategory.Math, "Arithmetic", Color.FromArgb(0x2C, 0xA5, 0xE2), "({0} + {1})", false, new[]{"a", "b"}),
@@ -868,8 +1069,7 @@ class MainForm : Form
                     }}
                 }
             },
-            new(BlockCategory.Files, "FILES", Color.FromArgb(0x8B, 0x5E, 0x3C), "📁")
-            {
+            new(BlockCategory.Files, "FILES", Color.FromArgb(0x8B, 0x5E, 0x3C), "files") {
                 SubCategories = {
                     new("Text Files") { Blocks = {
                         new("open()", BlockShape.Reporter, BlockCategory.Files, "Text Files", Color.FromArgb(0x8B, 0x5E, 0x3C), "open({0}, {1})", false, new[]{"'file.txt'", "'r'"}),
@@ -897,8 +1097,7 @@ class MainForm : Form
                     }}
                 }
             },
-            new(BlockCategory.UI, "UI", Color.FromArgb(0x0E, 0x9A, 0x6C), "🪟")
-            {
+            new(BlockCategory.UI, "UI", Color.FromArgb(0x0E, 0x9A, 0x6C), "ui") {
                 SubCategories = {
                     new("Window") { Blocks = {
                         new("create window", BlockShape.Stack, BlockCategory.UI, "Window", Color.FromArgb(0x0E, 0x9A, 0x6C), "root = tk.Tk()"),
@@ -924,8 +1123,7 @@ class MainForm : Form
                     }}
                 }
             },
-            new(BlockCategory.Time, "TIME", Color.FromArgb(0x2E, 0x8B, 0x8B), "🕐")
-            {
+            new(BlockCategory.Time, "TIME", Color.FromArgb(0x2E, 0x8B, 0x8B), "time") {
                 SubCategories = {
                     new("Current") { Blocks = {
                         new("now()", BlockShape.Reporter, BlockCategory.Time, "Current", Color.FromArgb(0x2E, 0x8B, 0x8B), "datetime.now()"),
@@ -940,8 +1138,7 @@ class MainForm : Form
                     }}
                 }
             },
-            new(BlockCategory.System, "SYSTEM", Color.FromArgb(0x55, 0x55, 0x55), "⚙")
-            {
+            new(BlockCategory.System, "SYSTEM", Color.FromArgb(0x55, 0x55, 0x55), "system") {
                 SubCategories = {
                     new("OS") { Blocks = {
                         new("platform", BlockShape.Reporter, BlockCategory.System, "OS", Color.FromArgb(0x55, 0x55, 0x55), "sys.platform"),
@@ -957,8 +1154,7 @@ class MainForm : Form
                     }}
                 }
             },
-            new(BlockCategory.Advanced, "ADVANCED", Color.FromArgb(0x4B, 0x4A, 0x60), "🧠")
-            {
+            new(BlockCategory.Advanced, "ADVANCED", Color.FromArgb(0x4B, 0x4A, 0x60), "advanced") {
                 SubCategories = {
                     new("Imports") { Blocks = {
                         new("import", BlockShape.Stack, BlockCategory.Advanced, "Imports", Color.FromArgb(0x4B, 0x4A, 0x60), "import {0}", false, new[]{"module"}),
@@ -992,7 +1188,6 @@ class MainForm : Form
 
     private void BuildUI()
     {
-        // Main layout: 3 columns (Block Storage | Workspace | Python Code)
         mainLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -1002,23 +1197,18 @@ class MainForm : Form
             Margin = new Padding(0),
             BackColor = Color.FromArgb(0xDD, 0xEE, 0xDE)
         };
-        mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 200)); // Block storage
-        mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));   // Workspace
-        mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));   // Python code
-        mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));  // Top panel
-        mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // Main content
-        mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));  // Bottom panel
+        mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 415)); // Block Storage
+        mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); // Workspace
+        mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 415)); // Python Code
+        mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
 
         // ── TOP PANEL ──────────────────────────
-        topPanel = new Panel
-        {
-            BackColor = Color.FromArgb(0xCD, 0xCD, 0xD2),
-            Dock = DockStyle.Fill,
-            Margin = new Padding(0)
-        };
+        topPanel = new Panel { BackColor = Color.FromArgb(0xCD, 0xCD, 0xD2), Dock = DockStyle.Fill, Margin = new Padding(0) };
         var topLabel = new Label
         {
-            Text = "  StencylPy – Visual Python Programming",
+            Text = "  SoftwareBuilder – Visual Python Programming",
             Font = new Font("Segoe UI", 11f, FontStyle.Bold),
             ForeColor = Color.FromArgb(0x33, 0x33, 0x33),
             AutoSize = true,
@@ -1030,73 +1220,87 @@ class MainForm : Form
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(0x5C, 0xB7, 0x12),
             ForeColor = Color.White,
-            Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
-            Size = new Size(70, 26),
-            Location = new Point(220, 5),
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+            Size = new Size(80, 28),
+            Anchor = AnchorStyles.Right | AnchorStyles.Top,
             Cursor = Cursors.Hand
         };
         runButton.FlatAppearance.BorderSize = 0;
         runButton.Click += (s, e) => UpdatePythonCode();
-        clearButton = new Button
-        {
-            Text = "✕ Clear",
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(0xBB, 0x00, 0x10),
-            ForeColor = Color.White,
-            Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
-            Size = new Size(70, 26),
-            Location = new Point(296, 5),
-            Cursor = Cursors.Hand
-        };
-        clearButton.FlatAppearance.BorderSize = 0;
-        clearButton.Click += (s, e) => { workspacePanel.ClearAll(); pythonCodeBox.Text = "# Drag blocks here to build your Python program\n"; };
-        copyButton = new Button
-        {
-            Text = "📋 Copy",
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(0x4A, 0x6C, 0xD4),
-            ForeColor = Color.White,
-            Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
-            Size = new Size(70, 26),
-            Location = new Point(372, 5),
-            Cursor = Cursors.Hand
-        };
-        copyButton.FlatAppearance.BorderSize = 0;
-        copyButton.Click += (s, e) => { if (!string.IsNullOrWhiteSpace(pythonCodeBox.Text)) { Clipboard.SetText(pythonCodeBox.Text); statusLabel.Text = "  Code copied to clipboard!"; } };
-        topPanel.Controls.AddRange(new Control[] { topLabel, runButton, clearButton, copyButton });
+        // Position Run button at the right
+        topPanel.Controls.Add(topLabel);
+        topPanel.Controls.Add(runButton);
+        runButton.Location = new Point(topPanel.Width - runButton.Width - 10, 4);
+        topPanel.Resize += (s, e) => runButton.Location = new Point(topPanel.Width - runButton.Width - 10, 4);
+
+        clearButton = new Button { /* hidden, replaced by right-click */ Visible = false };
+        copyButton = new Button { /* hidden */ Visible = false };
 
         // ── BLOCK STORAGE PANEL (Left) ─────────
-        var blockStorageContainer = new Panel
+        var storageContainer = new Panel
         {
             BackColor = Color.FromArgb(0xF0, 0xF2, 0xF0),
             Dock = DockStyle.Fill,
             Margin = new Padding(0),
             BorderStyle = BorderStyle.FixedSingle
         };
-        var storageLabel = new Label
+        // Search Bar
+        searchBox = new TextBox
         {
-            Text = "Block Storage",
-            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
-            ForeColor = Color.FromArgb(0x5C, 0x5C, 0x5C),
-            BackColor = Color.FromArgb(0xCD, 0xCD, 0xD2),
-            Dock = DockStyle.Top,
-            Height = 24,
-            TextAlign = ContentAlignment.MiddleCenter
+            Text = "Search blocks...",
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 9f),
+            Width = 390,
+            Location = new Point(4, 4)
         };
-        blockStoragePanel = new FlowLayoutPanel
+        searchBox.Enter += (s, e) => { if (searchBox.Text == "Search blocks...") { searchBox.Text = ""; searchBox.ForeColor = Color.Black; } };
+        searchBox.Leave += (s, e) => { if (string.IsNullOrWhiteSpace(searchBox.Text)) { searchBox.Text = "Search blocks..."; searchBox.ForeColor = Color.Gray; } };
+        searchBox.TextChanged += (s, e) => PopulateSubCategories(selectedCategory);
+        storageContainer.Controls.Add(searchBox);
+
+        // Category Grid (3x4)
+        categoryGrid = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Location = new Point(4, 30),
+            Size = new Size(406, 220),
+            ColumnCount = 3,
+            RowCount = 4,
+            BackColor = Color.Transparent,
+            Padding = new Padding(2)
+        };
+        for (int i = 0; i < 3; i++) categoryGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
+        for (int i = 0; i < 4; i++) categoryGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+        int idx = 0;
+        foreach (var cat in categories)
+        {
+            var btn = new CategoryButton(cat);
+            btn.Dock = DockStyle.Fill;
+            categoryGrid.Controls.Add(btn, idx % 3, idx / 3);
+            idx++;
+        }
+        storageContainer.Controls.Add(categoryGrid);
+
+        // Sub-category panel (scrollable)
+        subCategoryPanel = new FlowLayoutPanel
+        {
+            Location = new Point(4, 254),
+            Size = new Size(406, 400),
             AutoScroll = true,
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             BackColor = Color.FromArgb(0xF5, 0xF7, 0xF5),
-            Padding = new Padding(4)
+            BorderStyle = BorderStyle.None
         };
-        blockStorageContainer.Controls.Add(blockStoragePanel);
-        blockStorageContainer.Controls.Add(storageLabel);
+        storageContainer.Controls.Add(subCategoryPanel);
 
-        // Populate block storage
-        PopulateBlockStorage();
+        // Select first category by default
+        if (categories.Count > 0)
+        {
+            selectedCategory = categories[0];
+            ((CategoryButton)categoryGrid.Controls[0]).IsSelected = true;
+            categoryGrid.Controls[0].Invalidate();
+            PopulateSubCategories(selectedCategory);
+        }
 
         // ── WORKSPACE PANEL (Center) ────────────
         var workspaceContainer = new Panel
@@ -1155,45 +1359,21 @@ class MainForm : Form
         codeContainer.Controls.Add(codeLabel);
 
         // ── BOTTOM PANEL ────────────────────────
-        bottomPanel = new Panel
-        {
-            BackColor = Color.FromArgb(0xCD, 0xCD, 0xD2),
-            Dock = DockStyle.Fill,
-            Margin = new Padding(0)
-        };
+        bottomPanel = new Panel { BackColor = Color.FromArgb(0xCD, 0xCD, 0xD2), Dock = DockStyle.Fill, Margin = new Padding(0) };
         statusLabel = new Label
         {
-            Text = "  Ready – Drag blocks from the left panel into the workspace to start building your Python program!",
-            Font = new Font("Segoe UI", 8f, FontStyle.Regular),
+            Text = "  Ready – Select a category and drag blocks into the workspace.",
+            Font = new Font("Segoe UI", 8f),
             ForeColor = Color.FromArgb(0x44, 0x44, 0x44),
             AutoSize = true,
             Location = new Point(8, 4)
         };
-        var blockCountLabel = new Label
-        {
-            Text = "",
-            Font = new Font("Segoe UI", 8f, FontStyle.Regular),
-            ForeColor = Color.FromArgb(0x66, 0x66, 0x66),
-            AutoSize = true,
-            Location = new Point(500, 4)
-        };
         bottomPanel.Controls.Add(statusLabel);
-        bottomPanel.Controls.Add(blockCountLabel);
-
-        // Update block count periodically
-        var timer = new Timer { Interval = 500 };
-        timer.Tick += (s, e) =>
-        {
-            int count = workspacePanel.Blocks.Count;
-            blockCountLabel.Text = count > 0 ? $"Blocks placed: {count}" : "";
-            blockCountLabel.Location = new Point(bottomPanel.Width - blockCountLabel.Width - 20, 4);
-        };
-        timer.Start();
 
         // Add to main layout
         mainLayout.Controls.Add(topPanel, 0, 0);
         mainLayout.SetColumnSpan(topPanel, 3);
-        mainLayout.Controls.Add(blockStorageContainer, 0, 1);
+        mainLayout.Controls.Add(storageContainer, 0, 1);
         mainLayout.Controls.Add(workspaceContainer, 1, 1);
         mainLayout.Controls.Add(codeContainer, 2, 1);
         mainLayout.Controls.Add(bottomPanel, 0, 2);
@@ -1202,22 +1382,40 @@ class MainForm : Form
         Controls.Add(mainLayout);
     }
 
-    private void PopulateBlockStorage()
+    // Called when a category button is clicked
+    public void OnCategorySelected(CategoryInfo cat)
     {
-        blockStoragePanel.Controls.Clear();
-        foreach (var cat in categories)
+        selectedCategory = cat;
+        PopulateSubCategories(cat);
+        // Update the category grid buttons' visual states
+        foreach (Control c in categoryGrid.Controls)
+            if (c is CategoryButton cb) cb.Invalidate();
+    }
+
+    private void PopulateSubCategories(CategoryInfo cat)
+    {
+        subCategoryPanel.Controls.Clear();
+        if (cat == null) return;
+        string filter = searchBox.Text.Trim();
+        if (filter == "Search blocks..." || filter == "") filter = "";
+
+        foreach (var sub in cat.SubCategories)
         {
-            var header = new CategoryHeader(cat);
-            blockStoragePanel.Controls.Add(header);
-            foreach (var sub in cat.SubCategories)
+            var filteredBlocks = sub.Blocks.Where(b =>
+                string.IsNullOrEmpty(filter) || b.Label.ToLower().Contains(filter.ToLower())).ToList();
+            if (filteredBlocks.Count == 0) continue;
+
+            // Round label for sub-category
+            var roundLabel = new RoundLabel(sub.Name);
+            // Auto-size width based on text
+            int textWidth = TextRenderer.MeasureText(sub.Name, roundLabel.Font).Width + 20;
+            roundLabel.Width = textWidth > 100 ? textWidth : 100;
+            subCategoryPanel.Controls.Add(roundLabel);
+
+            foreach (var block in filteredBlocks)
             {
-                var subHeader = new SubCategoryHeader(sub.Name);
-                blockStoragePanel.Controls.Add(subHeader);
-                foreach (var blockDef in sub.Blocks)
-                {
-                    var item = new BlockStorageItem(blockDef);
-                    blockStoragePanel.Controls.Add(item);
-                }
+                var item = new BlockStorageItem(block);
+                subCategoryPanel.Controls.Add(item);
             }
         }
     }
@@ -1226,6 +1424,6 @@ class MainForm : Form
     {
         string code = workspacePanel.GeneratePython();
         pythonCodeBox.Text = code;
-        statusLabel.Text = $"  Python code updated – {workspacePanel.Blocks.Count} blocks translated.";
+        statusLabel.Text = $"  Python code updated – {workspacePanel.Blocks.Count} blocks placed.";
     }
 }

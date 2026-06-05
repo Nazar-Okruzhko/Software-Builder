@@ -2,10 +2,21 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net6.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>PyBlocks</RootNamespace>
+    <AssemblyName>PyBlocks</AssemblyName>
     <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <UseWPF>true</UseWPF>
-    <AssemblyName>PyStencyl</AssemblyName>
-    <RootNamespace>PyStencyl</RootNamespace>
+    <ApplicationIcon Condition="Exists('Icon1.ico')">Icon1.ico</ApplicationIcon>
+    <!-- Reduce extra output files -->
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
+  <!-- Copy everything under \base to the output folder -->
+  <ItemGroup>
+    <None Include="base\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>base\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+    </None>
+  </ItemGroup>
 </Project>

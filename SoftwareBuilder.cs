@@ -4,1272 +4,1800 @@
 // Replace Program.cs with this file, then: dotnet run
 // Assets: base\icons\*.png, base\fonts\*.ttf, Icon1.ico next to the executable (optional)
 
-#nullable disable
-
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Drawing.Text;
-using System.IO;
+using System.Drawing.Imaging;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
-
-static class Program
+ 
+namespace PyBlocksViewer
 {
-    [STAThread]
-    static void Main()
+    // =========================================================================
+    // Entry point
+    // =========================================================================
+    internal static class Program
     {
-        try
+        [STAThread]
+        private static void Main()
         {
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
-            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
-            Application.ThreadException += (s, e) =>
-                MessageBox.Show(e.Exception.ToString(), "Startup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
-                MessageBox.Show(e.ExceptionObject.ToString(), "Fatal Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            ApplicationConfiguration_Initialize();
             Application.Run(new MainForm());
         }
-        catch (Exception ex)
+ 
+        // Minimal stand-in for the WinForms-generated ApplicationConfiguration
+        // initializer, kept explicit so this really is a single file.
+        private static void ApplicationConfiguration_Initialize()
         {
-            MessageBox.Show(ex.ToString(), "Critical Startup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
         }
     }
-}
-
-enum BlockShape { Hat, Stack, CBlock, Reporter, Boolean }
-enum BlockCategory { Flow, Variables, Functions, Objects, Data, Text, Math, Files, UI, Time, System, Advanced }
-
-class CategoryInfo
-{
-    public BlockCategory Category;
-    public string Name;
-    public Color Color;
-    public string IconName;
-    public List<SubCategory> SubCategories = new();
-    public CategoryInfo(BlockCategory cat, string name, Color color, string iconName)
-    { Category = cat; Name = name; Color = color; IconName = iconName; }
-}
-
-class SubCategory
-{
-    public string Name;
-    public List<BlockDefinition> Blocks = new();
-    public SubCategory(string name) => Name = name;
-}
-
-class BlockDefinition
-{
-    public string Label;
-    public BlockShape Shape;
-    public BlockCategory Category;
-    public string SubCategory;
-    public Color Color;
-    public string PythonTemplate;
-    public string[] DefaultArgs;
-    public bool IsCBlock;
-
-    public BlockDefinition(string label, BlockShape shape, BlockCategory cat, string subCat,
-        Color color, string pyTemplate, bool isCBlock = false, string[] defaultArgs = null)
+ 
+    // =========================================================================
+    // Parse tree: plain text nodes and bracketed input nodes
+    // =========================================================================
+ 
+    /// <summary>Base class for a fragment of a block's inline content.</summary>
+    internal abstract class Node { }
+ 
+    /// <summary>Literal label text drawn directly on the block's face.</summary>
+    internal sealed class TextNode : Node
     {
-        Label = label; Shape = shape; Category = cat; SubCategory = subCat;
-        Color = color; PythonTemplate = pyTemplate; IsCBlock = isCBlock;
-        DefaultArgs = defaultArgs ?? Array.Empty<string>();
+        public string Text;
+        public TextNode(string text) => Text = text;
     }
-}
-
-// ── Font Loader ─────────────
-static class FontLoader
-{
-    private static PrivateFontCollection privateFonts = new();
-    private static FontFamily defaultFamily;
-
-    static FontLoader()
+ 
+    /// <summary>
+    /// A bracketed input: '(' round reporter/number slot, '[' square dropdown
+    /// field, '&lt;' angle boolean slot. May itself contain nested Nodes,
+    /// mirroring scratchblocks' own grammar (reporters can nest reporters).
+    /// NOTE: this was scratchblocks-syntax machinery; the Python tokenizer
+    /// uses PillNode below instead, but this stays available/dormant.
+    /// </summary>
+    internal sealed class BracketNode : Node
     {
-        try
+        public char Open; // '(' , '[' , or '<'
+        public List<Node> Children;
+        public BracketNode(char open, List<Node> children)
         {
-            string fontsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "base", "fonts");
-            if (Directory.Exists(fontsDir))
-                foreach (string file in Directory.GetFiles(fontsDir, "*.ttf"))
-                    privateFonts.AddFontFile(file);
-        }
-        catch { }
-        defaultFamily = privateFonts.Families.Length > 0 ? privateFonts.Families[0] : FontFamily.GenericSansSerif;
-    }
-
-    public static Font GetFont(float size, FontStyle style = FontStyle.Regular)
-    {
-        try { return new Font(defaultFamily, size, style, GraphicsUnit.Point); }
-        catch { return new Font(FontFamily.GenericSansSerif, size, style); }
-    }
-}
-
-// ── Exact Scratch 2.0 Block Paths (SVG → GDI+) ─
-static class ScratchBlockPath
-{
-    public static GraphicsPath HatPath(int w, int h)
-    {
-        var path = new GraphicsPath();
-        if (w <= 0 || h <= 0) return path;
-        path.AddArc(0, 12, 80, 80, 180, 90);
-        path.AddArc(w - 80, 10, 80, 80, 270, 90);
-        path.AddLine(w, 13, w, h - 3);
-        path.AddLine(w, h - 3, w - 3, h);
-        path.AddLine(w - 3, h, 27, h); path.AddLine(27, h, 24, h + 3);
-        path.AddLine(24, h + 3, 16, h + 3); path.AddLine(16, h + 3, 13, h);
-        path.AddLine(13, h, 3, h); path.AddLine(3, h, 0, h - 3);
-        path.AddLine(0, h - 3, 0, 13);
-        path.CloseFigure();
-        return path;
-    }
-    public static GraphicsPath StackPath(int w, int h) => StackOrCBlockPath(w, h, false, 0);
-    public static GraphicsPath CBlockPath(int w, int h, int armTop) => StackOrCBlockPath(w, h, true, armTop);
-    private static GraphicsPath StackOrCBlockPath(int w, int h, bool isCBlock, int armTop)
-    {
-        var p = new GraphicsPath();
-        if (w <= 0 || h <= 0) return p;
-        p.AddLine(w / 2 - 12, 0, w / 2, -3); p.AddLine(w / 2, -3, w / 2 + 12, 0);
-        p.AddLine(w / 2 + 12, 0, w - 3, 0); p.AddLine(w - 3, 0, w, 3);
-        if (isCBlock)
-        {
-            p.AddLine(w, 3, w, armTop - 2); p.AddLine(w, armTop - 2, w - 3, armTop);
-            p.AddLine(w - 15, armTop, w - 15, h - 3); p.AddLine(w - 15, h - 3, w - 27, h - 3);
-            p.AddLine(w - 27, h - 3, w - 24, h); p.AddLine(w - 24, h, w - 16, h);
-            p.AddLine(w - 16, h, w - 13, h - 3); p.AddLine(w - 13, h - 3, 0, h - 3);
-            p.AddLine(0, h - 3, 0, 3); p.AddLine(0, 3, 15, 3); p.AddLine(15, 3, 15, armTop);
-            p.AddLine(15, armTop, 0, armTop - 2);
-        }
-        else
-        {
-            p.AddLine(w, 3, w, h - 3); p.AddLine(w, h - 3, w - 3, h);
-            p.AddLine(w - 3, h, 27, h); p.AddLine(27, h, 24, h + 3);
-            p.AddLine(24, h + 3, 16, h + 3); p.AddLine(16, h + 3, 13, h);
-            p.AddLine(13, h, 3, h); p.AddLine(3, h, 0, h - 3); p.AddLine(0, h - 3, 0, 3);
-        }
-        p.CloseFigure();
-        return p;
-    }
-    public static GraphicsPath ReporterPath(int w, int h)
-    {
-        var p = new GraphicsPath();
-        if (w <= 0 || h <= 0) return p;
-        int r = h / 2;
-        p.AddArc(0, 0, r * 2, r * 2, 90, 180);
-        p.AddArc(w - r * 2, 0, r * 2, r * 2, 270, 180);
-        p.CloseFigure();
-        return p;
-    }
-    public static GraphicsPath BooleanPath(int w, int h)
-    {
-        var p = new GraphicsPath();
-        if (w <= 0 || h <= 0) return p;
-        int r = h / 2;
-        p.AddArc(0, 0, r * 2, r * 2, 90, 180); p.AddLine(r, 0, w - r, 0);
-        p.AddArc(w - r * 2, 0, r * 2, r * 2, 270, 90); p.AddLine(w, r, w, r);
-        p.AddArc(w - r * 2, h - r * 2, r * 2, r * 2, 0, 90); p.AddLine(w - r, h, r, h);
-        p.AddArc(0, h - r * 2, r * 2, r * 2, 90, 90);
-        p.CloseFigure();
-        return p;
-    }
-}
-
-// ── Gradient Panel (used for top, tabs, bottom) ─
-class GradientPanel : Panel
-{
-    public Color TopColor { get; set; } = Color.FromArgb(0xFD, 0xFE, 0xFE);
-    public Color BottomColor { get; set; } = Color.FromArgb(0xE6, 0xE8, 0xE8);
-
-    protected override void OnPaintBackground(PaintEventArgs e)
-    {
-        using var brush = new LinearGradientBrush(ClientRectangle, TopColor, BottomColor, LinearGradientMode.Vertical);
-        e.Graphics.FillRectangle(brush, ClientRectangle);
-    }
-}
-
-// ── Squircle helper ─
-static class SquircleHelper
-{
-    public static GraphicsPath CreateSquircle(Rectangle rect, int radius)
-    {
-        var path = new GraphicsPath();
-        path.AddArc(rect.X, rect.Y, radius, radius, 180, 90);
-        path.AddArc(rect.Right - radius, rect.Y, radius, radius, 270, 90);
-        path.AddArc(rect.Right - radius, rect.Bottom - radius, radius, radius, 0, 90);
-        path.AddArc(rect.X, rect.Bottom - radius, radius, radius, 90, 90);
-        path.CloseFigure();
-        return path;
-    }
-}
-
-// ── Toolbar Button ─
-class ToolbarButton : Control
-{
-    public string IconName;
-    private Image icon;
-    public ToolbarButton(string text, string iconName)
-    {
-        IconName = iconName;
-        Size = new Size(24, 24);
-        Cursor = Cursors.Hand;
-        LoadIcon();
-    }
-    private void LoadIcon()
-    {
-        try
-        {
-            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "base", "icons", IconName + ".png");
-            if (File.Exists(path)) icon = Image.FromFile(path);
-        }
-        catch { }
-    }
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        if (icon != null)
-            e.Graphics.DrawImage(icon, ClientRectangle);
-        else
-        {
-            using var font = new Font("Segoe UI", 7f);
-            TextRenderer.DrawText(e.Graphics, IconName.Substring(0, 1).ToUpper(), font, ClientRectangle, Color.Black, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            Open = open;
+            Children = children;
         }
     }
-}
-
-// ── Sub‑category squircle label ─
-class SubCategorySquircle : Control
-{
-    public string Title;
-    private static readonly Font SubFont = FontLoader.GetFont(8.5f);
-
-    public SubCategorySquircle(string title)
+ 
+    internal enum PillKind
     {
-        Title = title;
-        Height = 22;
-        Width = 120;
-        DoubleBuffered = true;
-        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+        Literal,  // a string or number literal - drawn as a plain white input field
+        Variable, // a bare identifier that isn't a keyword or a call name - drawn as a small colored "variable" block
     }
-
-    protected override void OnPaint(PaintEventArgs e)
+ 
+    /// <summary>
+    /// A small rounded pill embedded inline in a line of code: either a
+    /// literal (string/number - white input-field look) or a variable
+    /// reference (colored rounded block, like a Scratch variable reporter).
+    /// </summary>
+    internal sealed class PillNode : Node
     {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        var r = new Rectangle(0, 2, Width - 1, Height - 4);
-        if (r.Width <= 0 || r.Height <= 0) return;
-        using var path = SquircleHelper.CreateSquircle(r, r.Height / 2);
-        using var brush = new SolidBrush(Color.FromArgb(0x5C, 0x5C, 0x5C));
-        g.FillPath(brush, path);
-        using var textBrush = new SolidBrush(Color.White);
-        var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-        g.DrawString(Title, SubFont, textBrush, r, fmt);
-    }
-}
-
-// ── Category Button (squircle, icon + text) ─
-class CategoryButton : Control
-{
-    public CategoryInfo Info;
-    public bool IsSelected;
-    private Image icon;
-    private static readonly Font ButtonFont = FontLoader.GetFont(8.5f, FontStyle.Bold);
-
-    public CategoryButton(CategoryInfo info)
-    {
-        Info = info;
-        Height = 28;
-        Width = 130;
-        Cursor = Cursors.Hand;
-        DoubleBuffered = true;
-        LoadIcon();
-        SetStyle(ControlStyles.Selectable | ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
-    }
-
-    private void LoadIcon()
-    {
-        try
+        public string Text;
+        public PillKind Kind;
+        public PillNode(string text, PillKind kind)
         {
-            string basePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "base", "icons");
-            string file = Path.Combine(basePath, Info.IconName + ".png");
-            if (File.Exists(file)) icon = Image.FromFile(file);
+            Text = text;
+            Kind = kind;
         }
-        catch { icon = null; }
     }
-
-    protected override void OnPaint(PaintEventArgs e)
+ 
+    // =========================================================================
+    // Block shapes for a stack line
+    // =========================================================================
+    internal enum BlockShape
     {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        var r = ClientRectangle;
-        r.Inflate(-1, -1);
-        if (r.Width <= 0 || r.Height <= 0) return;
-        Color back = IsSelected ? ControlPaint.Dark(Info.Color, 0.3f) : Info.Color;
-        using var path = SquircleHelper.CreateSquircle(r, 10);
-        using var brush = new LinearGradientBrush(r, ControlPaint.Light(back, 0.2f), ControlPaint.Dark(back, 0.1f), LinearGradientMode.Vertical);
-        g.FillPath(brush, path);
-        using var pen = new Pen(ControlPaint.Dark(back, 0.4f), 1f);
-        g.DrawPath(pen, path);
-
-        int iconSize = 16;
-        int x = r.X + 4;
-        if (icon != null)
+        Hat,
+        Command,
+        Cap,
+        CBlock, // may have any number of chained continuations (elif/else, except/finally, ...)
+    }
+ 
+    /// <summary>One block in a script stack (possibly containing nested stacks / "mouths").</summary>
+    internal sealed class BlockNode
+    {
+        public List<Node> Header = new();
+ 
+        // Chained continuation headers, e.g. for "if / elif / elif / else" or
+        // "try / except / except / finally": ContinuationHeaders.Count == Mouths.Count - 1.
+        public List<List<Node>> ContinuationHeaders = new();
+ 
+        public string Category = "grey";
+        public BlockShape Shape = BlockShape.Command;
+        public Color? TextColorOverride; // used for comment lines (dark text instead of the usual white)
+        public bool HatTop; // true for class/def: arched top ("starter block"), no puzzle notch expected from above
+ 
+        // Raw (0-based) line indices into the source textbox this block came
+        // from. SourceLine is this block's own header line; EndLine is the
+        // LAST line anywhere in its subtree (its own line if it's a simple
+        // command, otherwise the last line of its last mouth/continuation).
+        // Used to translate a drag-drop target back into a real text edit.
+        public int SourceLine = -1;
+        public int EndLine = -1;
+ 
+        // Mouths[0] is the body directly under Header; Mouths[k+1] is the body
+        // under ContinuationHeaders[k].
+        public List<List<BlockNode>> Mouths = new();
+ 
+        // ---- layout cache, populated by Renderer.Measure ----
+        public float W, H;
+        public List<float> MouthW = new();
+        public List<float> MouthH = new();
+        public float HeaderH, FooterH;
+        public List<float> ContinuationHeaderH = new();
+ 
+        // Per-bar widths for a CBlock: BarW[0] is the header bar's own width
+        // (sized to fit its own text AND Mouths[0]); BarW[k] for k>0 is
+        // ContinuationHeaders[k-1]'s own bar width (sized to fit its own text
+        // AND Mouths[k]). FooterW is the footer bar's width (sized to fit
+        // Mouths[last] only, since the footer has no text of its own). W is
+        // the max of all of these - the bounding width other blocks need to
+        // know about for stacking - but each bar is drawn at its OWN width,
+        // not stretched out to W, so the block's outline can step narrower
+        // or wider between bars to hug whatever is actually inside it.
+        public List<float> BarW = new();
+        public float FooterW;
+    }
+ 
+    // =========================================================================
+    // Parser: turns real, indented Python source into a block-stack tree.
+    // Lines ending in ":" (ignoring trailing comments) open a nested "mouth";
+    // elif/else/except/finally chain onto the same block as continuations.
+    // =========================================================================
+    internal static class ScriptParser
+    {
+        public static List<BlockNode> Parse(string source)
         {
-            g.DrawImage(icon, new Rectangle(x, r.Y + (r.Height - iconSize) / 2, iconSize, iconSize));
-            x += iconSize + 3;
-        }
-        using var textBrush = new SolidBrush(Color.White);
-        g.DrawString(Info.Name, ButtonFont, textBrush, new PointF(x, r.Y + (r.Height - ButtonFont.Height) / 2));
-    }
-
-    protected override void OnClick(EventArgs e)
-    {
-        var parent = Parent as TableLayoutPanel;
-        if (parent != null)
-        {
-            foreach (Control c in parent.Controls)
-                if (c is CategoryButton cb) cb.IsSelected = false;
-            IsSelected = true;
-            ((MainForm)FindForm())?.OnCategorySelected(Info);
-        }
-        Invalidate();
-        base.OnClick(e);
-    }
-}
-
-// ── Block palette item ─
-class BlockStorageItem : Control
-{
-    public BlockDefinition Definition;
-    public bool IsHovered;
-    private static readonly Font BlockFont = FontLoader.GetFont(8.5f, FontStyle.Bold);
-
-    public BlockStorageItem(BlockDefinition def)
-    {
-        Definition = def;
-        Size = new Size(148, 26);
-        Cursor = Cursors.Hand;
-        DoubleBuffered = true;
-        SetStyle(ControlStyles.Selectable | ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = TextRenderingHint.AntiAlias;
-
-        Rectangle r = new Rectangle(2, 2, Width - 4, Height - 4);
-        if (r.Width <= 0 || r.Height <= 0) return;
-        Color baseColor = Definition.Color;
-        if (IsHovered) baseColor = ControlPaint.Light(baseColor, 0.2f);
-
-        GraphicsPath path = Definition.Shape switch
-        {
-            BlockShape.Hat => ScratchBlockPath.HatPath(r.Width, r.Height),
-            BlockShape.Stack when Definition.IsCBlock => ScratchBlockPath.CBlockPath(r.Width, r.Height, 20),
-            BlockShape.Stack => ScratchBlockPath.StackPath(r.Width, r.Height),
-            BlockShape.Reporter => ScratchBlockPath.ReporterPath(r.Width, r.Height),
-            BlockShape.Boolean => ScratchBlockPath.BooleanPath(r.Width, r.Height),
-            _ => ScratchBlockPath.StackPath(r.Width, r.Height)
-        };
-
-        using var brush = new LinearGradientBrush(r, ControlPaint.Light(baseColor, 0.3f), ControlPaint.Dark(baseColor, 0.15f), LinearGradientMode.Vertical);
-        g.FillPath(brush, path);
-        using var pen = new Pen(ControlPaint.Dark(baseColor, 0.35f), 1f);
-        g.DrawPath(pen, path);
-        path.Dispose();
-
-        var textRect = new Rectangle(r.X + 6, r.Y + 3, r.Width - 12, r.Height - 6);
-        using var textBrush = new SolidBrush(IsDarkColor(baseColor) ? Color.White : Color.Black);
-        var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-        g.DrawString(Definition.Label, BlockFont, textBrush, textRect, fmt);
-    }
-
-    protected override void OnMouseEnter(EventArgs e) { IsHovered = true; Invalidate(); base.OnMouseEnter(e); }
-    protected override void OnMouseLeave(EventArgs e) { IsHovered = false; Invalidate(); base.OnMouseLeave(e); }
-
-    protected override void OnMouseDown(MouseEventArgs e)
-    {
-        if (e.Button == MouseButtons.Left)
-        {
-            var wsBlock = new WorkspaceBlock(Definition, Point.Empty);
-            DoDragDrop(wsBlock, DragDropEffects.Copy);
-        }
-        base.OnMouseDown(e);
-    }
-
-    private static bool IsDarkColor(Color c) => (c.R * 0.299 + c.G * 0.587 + c.B * 0.114) < 140;
-}
-
-// ── Workspace Block ─
-class WorkspaceBlock : ICloneable
-{
-    public BlockDefinition Definition;
-    public Rectangle Bounds;
-    public string[] ArgValues;
-    public bool IsDragging, IsSelected;
-
-    public WorkspaceBlock(BlockDefinition def, Point loc)
-    {
-        Definition = def;
-        Bounds = new Rectangle(loc, GetBlockSize(def));
-        ArgValues = (string[])def.DefaultArgs.Clone();
-    }
-
-    public static Size GetBlockSize(BlockDefinition def)
-    {
-        int w = Math.Max(80, TextRenderer.MeasureText(def.Label, FontLoader.GetFont(9f, FontStyle.Bold)).Width + 40);
-        if (def.Shape == BlockShape.Boolean) return new Size(Math.Max(w, 60), 26);
-        if (def.Shape == BlockShape.Reporter) return new Size(Math.Max(w, 50), 24);
-        if (def.IsCBlock) return new Size(Math.Max(w, 120), 70);
-        return new Size(w, 26);
-    }
-
-    public object Clone()
-    {
-        var c = new WorkspaceBlock(Definition, Bounds.Location);
-        c.ArgValues = (string[])ArgValues.Clone();
-        c.Bounds = Bounds;
-        c.IsSelected = IsSelected;
-        return c;
-    }
-}
-
-// ── Undo/Redo ─
-class UndoRedoManager
-{
-    Stack<List<WorkspaceBlock>> undo = new(), redo = new();
-    public void SaveState(List<WorkspaceBlock> b)
-    {
-        undo.Push(b.Select(x => (WorkspaceBlock)x.Clone()).ToList());
-        redo.Clear();
-        if (undo.Count > 30) undo = new Stack<List<WorkspaceBlock>>(undo.Take(30));
-    }
-    public List<WorkspaceBlock> Undo(List<WorkspaceBlock> cur)
-    {
-        if (undo.Count == 0) return null;
-        redo.Push(cur.Select(x => (WorkspaceBlock)x.Clone()).ToList());
-        return undo.Pop();
-    }
-    public List<WorkspaceBlock> Redo(List<WorkspaceBlock> cur)
-    {
-        if (redo.Count == 0) return null;
-        undo.Push(cur.Select(x => (WorkspaceBlock)x.Clone()).ToList());
-        return redo.Pop();
-    }
-}
-
-// ── Workspace Panel ─
-class WorkspacePanel : Panel
-{
-    public List<WorkspaceBlock> Blocks = new();
-    public UndoRedoManager UndoRedo = new();
-    public WorkspaceBlock ClipboardBlock;
-    private Point dragOffset;
-    private WorkspaceBlock draggingBlock;
-    private bool selecting;
-    private Point selectStart, selectEnd;
-    private ContextMenuStrip contextMenu;
-    private const int SnapDistance = 10;
-
-    public event Action CodeChanged;
-
-    public WorkspacePanel()
-    {
-        DoubleBuffered = true;
-        AllowDrop = true;
-        BackColor = Color.FromArgb(0xE6, 0xE8, 0xE8); // #E6E8E8
-        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
-        InitializeContextMenu();
-    }
-
-    private void InitializeContextMenu()
-    {
-        contextMenu = new ContextMenuStrip();
-        contextMenu.Items.Add("Undo", null, (s, e) => Undo());
-        contextMenu.Items.Add("Redo", null, (s, e) => Redo());
-        contextMenu.Items.Add(new ToolStripSeparator());
-        contextMenu.Items.Add("Copy", null, (s, e) => CopySelected());
-        contextMenu.Items.Add("Paste", null, (s, e) => PasteFromClipboard());
-        contextMenu.Items.Add("Paste a Block", null, (s, e) => PasteBlock());
-        contextMenu.Items.Add(new ToolStripSeparator());
-        contextMenu.Items.Add("Arrange Blocks", null, (s, e) => ArrangeBlocks());
-    }
-
-    public void SaveUndoState() => UndoRedo.SaveState(Blocks);
-
-    private void Undo()
-    {
-        var restored = UndoRedo.Undo(Blocks);
-        if (restored != null) { Blocks = restored; Invalidate(); TriggerCodeUpdate(); }
-    }
-    private void Redo()
-    {
-        var restored = UndoRedo.Redo(Blocks);
-        if (restored != null) { Blocks = restored; Invalidate(); TriggerCodeUpdate(); }
-    }
-    private void CopySelected()
-    {
-        var sel = Blocks.FirstOrDefault(b => b.IsSelected);
-        if (sel != null) ClipboardBlock = (WorkspaceBlock)sel.Clone();
-    }
-    private void PasteFromClipboard()
-    {
-        if (ClipboardBlock == null) return;
-        SaveUndoState();
-        var newBlock = (WorkspaceBlock)ClipboardBlock.Clone();
-        newBlock.Bounds = new Rectangle(ClipboardBlock.Bounds.X + 20, ClipboardBlock.Bounds.Y + 20,
-            newBlock.Bounds.Width, newBlock.Bounds.Height);
-        Blocks.Add(newBlock);
-        Invalidate();
-        TriggerCodeUpdate();
-    }
-    private void PasteBlock() => PasteFromClipboard();
-
-    public void ArrangeBlocks()
-    {
-        SaveUndoState();
-        int y = 10, x = 10;
-        foreach (var b in Blocks.OrderBy(b => b.Bounds.Y))
-        {
-            b.Bounds = new Rectangle(x, y, b.Bounds.Width, b.Bounds.Height);
-            y += b.Bounds.Height + 4;
-        }
-        Invalidate();
-        TriggerCodeUpdate();
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = TextRenderingHint.AntiAlias;
-
-        // Dot pattern
-        using var dotBrush = new SolidBrush(Color.FromArgb(180, 200, 200));
-        for (int x = 15; x < Width; x += 24)
-            for (int y = 15; y < Height; y += 24)
-                g.FillEllipse(dotBrush, x - 1, y - 1, 2, 2);
-
-        foreach (var block in Blocks)
-        {
-            if (block == draggingBlock) continue;
-            DrawWorkspaceBlock(g, block);
-        }
-        if (draggingBlock != null) DrawWorkspaceBlock(g, draggingBlock);
-
-        if (selecting)
-        {
-            var rect = GetSelectionRectangle();
-            if (rect.Width > 0 && rect.Height > 0)
+            var lines = Tokenize(source);
+            int i = 0;
+            int rootIndent = lines.Count > 0 ? lines[0].indent : 0;
+            var result = ParseBlock(lines, ref i, rootIndent);
+ 
+            // A shebang ("#!/usr/bin/env python3") is the script's own
+            // starter line - give it a hat, not the grey comment styling.
+            if (result.Count > 0 && lines.Count > 0 && lines[0].text.TrimStart().StartsWith("#!"))
             {
-                using var selPen = new Pen(Color.DodgerBlue, 2f) { DashStyle = DashStyle.Dash };
-                g.DrawRectangle(selPen, rect);
+                result[0].Category = "system";
+                result[0].TextColorOverride = null;
+                result[0].Shape = BlockShape.Hat;
             }
+            return result;
         }
-    }
-
-    private void DrawWorkspaceBlock(Graphics g, WorkspaceBlock block)
-    {
-        var r = block.Bounds;
-        if (r.Width <= 0 || r.Height <= 0) return;
-        Color c = block.Definition.Color;
-        if (block.IsDragging) c = Color.FromArgb(200, c);
-        if (block.IsSelected) c = ControlPaint.Light(c, 0.4f);
-
-        GraphicsPath path = block.Definition.Shape switch
+ 
+        private static List<(int raw, int indent, string text)> Tokenize(string source)
         {
-            BlockShape.Hat => ScratchBlockPath.HatPath(r.Width, r.Height),
-            BlockShape.Stack when block.Definition.IsCBlock => ScratchBlockPath.CBlockPath(r.Width, r.Height, 20),
-            BlockShape.Stack => ScratchBlockPath.StackPath(r.Width, r.Height),
-            BlockShape.Reporter => ScratchBlockPath.ReporterPath(r.Width, r.Height),
-            BlockShape.Boolean => ScratchBlockPath.BooleanPath(r.Width, r.Height),
-            _ => ScratchBlockPath.StackPath(r.Width, r.Height)
-        };
-
-        var state = g.Save();
-        g.TranslateTransform(r.X, r.Y);
-        using (var fill = new LinearGradientBrush(new Rectangle(0, 0, r.Width, r.Height),
-                   ControlPaint.Light(c, 0.35f), ControlPaint.Dark(c, 0.12f), LinearGradientMode.Vertical))
-            g.FillPath(fill, path);
-        using (var outline = new Pen(ControlPaint.Dark(c, 0.4f), block.IsSelected ? 2.5f : 1.2f))
-            g.DrawPath(outline, path);
-        path.Dispose();
-
-        using var textBrush = new SolidBrush(IsDarkColor(c) ? Color.White : Color.Black);
-        var font = FontLoader.GetFont(9f, FontStyle.Bold);
-        var textRect = block.Definition.IsCBlock
-            ? new Rectangle(6, 3, r.Width - 12, 18)
-            : new Rectangle(6, 2, r.Width - 12, r.Height - 4);
-        if (textRect.Width > 0 && textRect.Height > 0)
-        {
-            var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-            g.DrawString(block.Definition.Label, font, textBrush, textRect, fmt);
-        }
-        g.Restore(state);
-    }
-
-    private Rectangle GetSelectionRectangle() => new Rectangle(
-        Math.Min(selectStart.X, selectEnd.X),
-        Math.Min(selectStart.Y, selectEnd.Y),
-        Math.Abs(selectStart.X - selectEnd.X),
-        Math.Abs(selectStart.Y - selectEnd.Y));
-
-    protected override void OnDragOver(DragEventArgs e)
-    {
-        if (e.Data.GetDataPresent(typeof(WorkspaceBlock)))
-        {
-            e.Effect = DragDropEffects.Copy;
-            var pt = PointToClient(new Point(e.X, e.Y));
-            if (draggingBlock == null)
+            var result = new List<(int, int, string)>();
+            var rawLines = (source ?? string.Empty).Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+            for (int rawIdx = 0; rawIdx < rawLines.Length; rawIdx++)
             {
-                draggingBlock = (WorkspaceBlock)e.Data.GetData(typeof(WorkspaceBlock));
-                draggingBlock = new WorkspaceBlock(draggingBlock.Definition, pt);
-                draggingBlock.IsDragging = true;
-                Blocks.Add(draggingBlock);
-                SaveUndoState();
+                string raw = rawLines[rawIdx];
+                if (raw.Trim().Length == 0) continue; // blank lines don't get a block
+                string expanded = raw.Replace("\t", "    ");
+                int indent = expanded.Length - expanded.TrimStart(' ').Length;
+                result.Add((rawIdx, indent, expanded.TrimEnd()));
             }
-            draggingBlock.Bounds = new Rectangle(
-                pt.X - draggingBlock.Bounds.Width / 2,
-                pt.Y - draggingBlock.Bounds.Height / 2,
-                draggingBlock.Bounds.Width,
-                draggingBlock.Bounds.Height);
-            Invalidate();
+            return result;
         }
-        base.OnDragOver(e);
-    }
-
-    protected override void OnDragDrop(DragEventArgs e)
-    {
-        if (draggingBlock != null)
+ 
+        private static List<BlockNode> ParseBlock(List<(int raw, int indent, string text)> lines, ref int i, int blockIndent)
         {
-            draggingBlock.IsDragging = false;
-            SnapToGridAndBlocks(draggingBlock);
-            draggingBlock = null;
-            Invalidate();
-            TriggerCodeUpdate();
-        }
-        base.OnDragDrop(e);
-    }
-
-    protected override void OnDragLeave(EventArgs e)
-    {
-        if (draggingBlock != null) { Blocks.Remove(draggingBlock); draggingBlock = null; Invalidate(); }
-        base.OnDragLeave(e);
-    }
-
-    protected override void OnMouseDown(MouseEventArgs e)
-    {
-        if (e.Button == MouseButtons.Left)
-        {
-            for (int i = Blocks.Count - 1; i >= 0; i--)
+            var result = new List<BlockNode>();
+            while (i < lines.Count && lines[i].indent >= blockIndent)
             {
-                if (Blocks[i].Bounds.Contains(e.Location))
+                if (lines[i].indent > blockIndent) blockIndent = lines[i].indent; // tolerate ragged indentation
+ 
+                var (raw, indent, text) = lines[i];
+                i++;
+                string trimmed = text.TrimStart();
+                var block = BuildLineNode(trimmed);
+                block.SourceLine = raw;
+                block.EndLine = raw;
+ 
+                if (LineOpensBlock(trimmed))
                 {
-                    if (ModifierKeys.HasFlag(Keys.Control))
+                    string codeOnly = StripComment(trimmed).TrimEnd();
+                    block.HatTop = codeOnly.StartsWith("class ") || codeOnly.StartsWith("def ");
+ 
+                    int childIndent = (i < lines.Count && lines[i].indent > indent) ? lines[i].indent : indent + 4;
+                    block.Mouths.Add(ParseBlock(lines, ref i, childIndent));
+                    block.Shape = BlockShape.CBlock;
+ 
+                    while (i < lines.Count && lines[i].indent == indent && IsContinuationKeyword(lines[i].text.TrimStart()))
                     {
-                        Blocks[i].IsSelected = !Blocks[i].IsSelected;
-                        Invalidate();
-                        return;
+                        int contRaw = lines[i].raw;
+                        string contText = lines[i].text.TrimStart();
+                        i++;
+                        block.ContinuationHeaders.Add(BuildHeaderNodes(contText));
+                        block.EndLine = contRaw;
+                        int contChildIndent = (i < lines.Count && lines[i].indent > indent) ? lines[i].indent : indent + 4;
+                        block.Mouths.Add(ParseBlock(lines, ref i, contChildIndent));
                     }
-                    draggingBlock = Blocks[i];
-                    dragOffset = new Point(e.X - Blocks[i].Bounds.X, e.Y - Blocks[i].Bounds.Y);
-                    draggingBlock.IsDragging = true;
-                    if (!Blocks[i].IsSelected) { DeselectAll(); Blocks[i].IsSelected = true; }
-                    Invalidate();
-                    return;
+ 
+                    // EndLine is the last raw line actually consumed anywhere
+                    // in this block's subtree (last mouth's last line, or its
+                    // own header/continuation line if every mouth is empty).
+                    if (i > 0) block.EndLine = Math.Max(block.EndLine, lines[i - 1].raw);
+                }
+ 
+                result.Add(block);
+            }
+            return result;
+        }
+ 
+        private static BlockNode BuildLineNode(string trimmed)
+        {
+            var block = new BlockNode { Header = BuildHeaderNodes(trimmed) };
+            string codePart = StripComment(trimmed).TrimEnd();
+ 
+            if (trimmed.StartsWith("#"))
+            {
+                block.Category = "comment";
+                block.TextColorOverride = Color.FromArgb(90, 90, 90);
+            }
+            else
+            {
+                block.Category = PyClassifier.Classify(codePart.Length > 0 ? codePart : trimmed);
+            }
+            block.Shape = BlockShape.Command; // upgraded to CBlock by the caller if it opens a suite
+            return block;
+        }
+ 
+        /// <summary>
+        /// Builds the inline node list for one line: comment-only lines stay
+        /// as a single plain TextNode, everything else gets tokenized into
+        /// plain code text / literal input pills / variable pills, with any
+        /// trailing "# comment" re-appended as plain text afterwards.
+        /// </summary>
+        private static List<Node> BuildHeaderNodes(string trimmed)
+        {
+            if (trimmed.TrimStart().StartsWith("#"))
+                return new List<Node> { new TextNode(trimmed) };
+ 
+            string code = StripComment(trimmed);
+            string rest = trimmed.Substring(code.Length); // whitespace + "#..." if any, else ""
+ 
+            var nodes = TokenizeCodeLine(code.TrimEnd());
+            string trailingWs = code.Substring(code.TrimEnd().Length); // whitespace eaten by TrimEnd, put back before the comment
+            string comment = trailingWs + rest;
+            if (comment.Length > 0) nodes.Add(new TextNode(comment));
+            return nodes;
+        }
+ 
+        private static bool IsContinuationKeyword(string trimmed)
+        {
+            return trimmed.StartsWith("elif ") || trimmed.StartsWith("elif(")
+                || trimmed == "else:" || trimmed.StartsWith("else:")
+                || trimmed.StartsWith("except") || trimmed.StartsWith("finally");
+        }
+ 
+        private static bool LineOpensBlock(string trimmed)
+        {
+            if (trimmed.StartsWith("#")) return false;
+            string code = StripComment(trimmed).TrimEnd();
+            return code.EndsWith(":");
+        }
+ 
+        /// <summary>Strips a trailing '#' comment, ignoring '#' characters inside quotes.</summary>
+        private static string StripComment(string s)
+        {
+            bool inSingle = false, inDouble = false;
+            for (int idx = 0; idx < s.Length; idx++)
+            {
+                char c = s[idx];
+                if (c == '\'' && !inDouble) inSingle = !inSingle;
+                else if (c == '"' && !inSingle) inDouble = !inDouble;
+                else if (c == '#' && !inSingle && !inDouble) return s.Substring(0, idx);
+            }
+            return s;
+        }
+ 
+        // ---- inline tokenizer: turns one line of Python code into plain
+        // text / literal pills / variable pills ------------------------------
+ 
+        private static readonly HashSet<string> PyKeywords = new(StringComparer.Ordinal)
+        {
+            "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
+            "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
+            "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
+            "return", "try", "while", "with", "yield", "self", "cls", "match", "case",
+        };
+ 
+        private static readonly Regex TokenPattern = new Regex(
+            "(?<str>(?:[fFrRbB]{0,2})(?:\"\"\"(?:[^\\\\]|\\\\.)*?\"\"\"|'''(?:[^\\\\]|\\\\.)*?'''|\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'))" +
+            "|(?<num>(?<![\\w.])\\d[\\d_]*\\.?[\\d_]*(?:[eE][+-]?\\d+)?(?![\\w.]))" +
+            "|(?<id>[A-Za-z_][A-Za-z0-9_]*)",
+            RegexOptions.Compiled);
+ 
+        private static List<Node> TokenizeCodeLine(string code)
+        {
+            var nodes = new List<Node>();
+            var plain = new StringBuilder();
+ 
+            void FlushPlain()
+            {
+                if (plain.Length > 0) { nodes.Add(new TextNode(plain.ToString())); plain.Clear(); }
+            }
+ 
+            int pos = 0;
+            foreach (Match m in TokenPattern.Matches(code))
+            {
+                if (m.Index > pos) plain.Append(code, pos, m.Index - pos);
+ 
+                if (m.Groups["str"].Success || m.Groups["num"].Success)
+                {
+                    FlushPlain();
+                    nodes.Add(new PillNode(m.Value, PillKind.Literal));
+                }
+                else // identifier
+                {
+                    string word = m.Value;
+                    bool isKeyword = PyKeywords.Contains(word);
+                    bool followedByCall = m.Index + m.Length < code.Length && code[m.Index + m.Length] == '(';
+                    if (isKeyword || followedByCall)
+                    {
+                        plain.Append(word);
+                    }
+                    else
+                    {
+                        FlushPlain();
+                        nodes.Add(new PillNode(word, PillKind.Variable));
+                    }
+                }
+ 
+                pos = m.Index + m.Length;
+            }
+ 
+            if (pos < code.Length) plain.Append(code, pos, code.Length - pos);
+            FlushPlain();
+ 
+            if (nodes.Count == 0) nodes.Add(new TextNode(code)); // degenerate/empty line - keep something drawable
+            return nodes;
+        }
+ 
+ 
+        // tokenize bracketed expressions again. ----
+        public static string HeaderKeywordText(List<Node> nodes)
+        {
+            var sb = new StringBuilder();
+            foreach (var n in nodes)
+            {
+                if (n is TextNode t) sb.Append(t.Text);
+                else sb.Append(' ');
+            }
+            return Regex.Replace(sb.ToString(), @"\s+", " ").Trim().ToLowerInvariant();
+        }
+ 
+        public static List<Node> ParseNodes(string s)
+        {
+            int i = 0;
+            return ParseUntil(s, ref i, '\0');
+        }
+ 
+        private static List<Node> ParseUntil(string s, ref int i, char closeChar)
+        {
+            var nodes = new List<Node>();
+            var sb = new StringBuilder();
+ 
+            void Flush()
+            {
+                if (sb.Length > 0) { nodes.Add(new TextNode(sb.ToString())); sb.Clear(); }
+            }
+ 
+            while (i < s.Length)
+            {
+                char c = s[i];
+                if (closeChar != '\0' && c == closeChar) { i++; Flush(); return nodes; }
+ 
+                if (c == '(' || c == '[' || c == '<')
+                {
+                    Flush();
+                    char open = c;
+                    char close = open == '(' ? ')' : (open == '[' ? ']' : '>');
+                    i++;
+                    var children = ParseUntil(s, ref i, close);
+                    nodes.Add(new BracketNode(open, children));
+                    continue;
+                }
+ 
+                sb.Append(c);
+                i++;
+            }
+            Flush();
+            return nodes;
+        }
+    }
+ 
+    // =========================================================================
+    // Category classification + palette, driven by the LVL1-LVL12 Python
+    // taxonomy: FLOW / VARIABLES / FUNCTIONS / OBJECTS / DATA / TEXT / MATH /
+    // FILES / UI / TIME / SYSTEM / ADVANCED (colors match the "FINAL CATEGORY
+    // TABLE" you provided; OBJECTS wasn't in that table so it gets its own
+    // distinct color rather than being folded into FUNCTIONS).
+    // =========================================================================
+    internal static class PyClassifier
+    {
+        public static readonly Dictionary<string, Color> CategoryColors = new()
+        {
+            ["flow"] = ColorTranslator.FromHtml("#E1A91A"),      // Yellow
+            ["variables"] = ColorTranslator.FromHtml("#4A6CD4"), // Blue
+            ["functions"] = ColorTranslator.FromHtml("#8E44AD"), // Purple
+            ["objects"] = ColorTranslator.FromHtml("#C2185B"),   // (not in table) deep pink/magenta
+            ["data"] = ColorTranslator.FromHtml("#27AE60"),      // Green
+            ["text"] = ColorTranslator.FromHtml("#E07B1A"),      // Orange
+            ["math"] = ColorTranslator.FromHtml("#5B7C99"),      // Gray-blue
+            ["files"] = ColorTranslator.FromHtml("#8D6748"),     // Brown
+            ["ui"] = ColorTranslator.FromHtml("#17A2B8"),        // Cyan
+            ["time"] = ColorTranslator.FromHtml("#009688"),      // Teal
+            ["system"] = ColorTranslator.FromHtml("#555555"),    // Dark gray
+            ["advanced"] = ColorTranslator.FromHtml("#4A235A"),  // Dark purple
+            ["comment"] = ColorTranslator.FromHtml("#E8E8E8"),   // pale gray, dark text
+            ["grey"] = ColorTranslator.FromHtml("#8B8B8B"),      // fallback / unrecognized
+        };
+ 
+        // Ordered by priority (most specific / least ambiguous first), NOT by
+        // length - deliberately front-loads structural keywords, imports, and
+        // dotted method-call patterns before the generic assignment fallback.
+        // wordStart=true: must match at the very start of the (trimmed) line.
+        // wordStart=false: matched anywhere in the line (dotted calls, literals).
+        private static readonly (string pat, string cat, bool wordStart)[] Rules =
+        {
+            // ---- FLOW (LVL1: execution, conditions, loops, exceptions) ----
+            ("pass", "flow", true),
+            ("return", "flow", true),
+            ("yield", "flow", true),
+            ("if ", "flow", true), ("if(", "flow", true),
+            ("elif", "flow", true),
+            ("else", "flow", true),
+            ("match ", "flow", true),
+            ("case ", "flow", true),
+            ("for ", "flow", true),
+            ("while ", "flow", true),
+            ("break", "flow", true),
+            ("continue", "flow", true),
+            ("try", "flow", true),
+            ("except", "flow", true),
+            ("finally", "flow", true),
+            ("raise", "flow", true),
+            ("with ", "flow", true),
+            ("range(", "flow", false),
+            ("enumerate(", "flow", false),
+            ("zip(", "flow", false),
+            ("reversed(", "flow", false),
+ 
+            // ---- FUNCTIONS (LVL3) ----
+            ("def ", "functions", true),
+            ("lambda", "functions", false),
+            ("global ", "functions", true),
+            ("nonlocal ", "functions", true),
+            ("*args", "functions", false),
+            ("**kwargs", "functions", false),
+ 
+            // ---- OBJECTS (LVL4 - not in the summary table, own color) ----
+            ("class ", "objects", true),
+            ("self.", "objects", false),
+            ("__init__", "objects", false),
+            ("super(", "objects", false),
+ 
+            // ---- ADVANCED (LVL12) ----
+            ("import ", "advanced", true),
+            ("from ", "advanced", true),
+            ("async ", "advanced", true),
+            ("await ", "advanced", false),
+            ("Optional[", "advanced", false),
+            ("List[", "advanced", false),
+            ("hasattr(", "advanced", false),
+            ("gc.", "advanced", false),
+ 
+            // ---- FILES (LVL8) - checked before TEXT so os.path.join wins over .join(  ----
+            ("os.path.", "files", false),
+            ("os.remove", "files", false),
+            ("os.rename", "files", false),
+            ("os.listdir", "files", false),
+            ("open(", "files", false),
+            (".readline(", "files", false),
+            (".readbytes(", "files", false),
+            (".writebytes(", "files", false),
+            (".read(", "files", false),
+            (".write(", "files", false),
+            ("\"rb\"", "files", false), ("'rb'", "files", false),
+            ("\"wb\"", "files", false), ("'wb'", "files", false),
+ 
+            // ---- TIME (LVL10) ----
+            ("time.sleep", "time", false),
+            ("sleep(", "time", false),
+            ("datetime.now", "time", false),
+            (".now(", "time", false),
+            ("timestamp(", "time", false),
+            ("strftime(", "time", false),
+ 
+            // ---- SYSTEM (LVL11) ----
+            ("sys.exit(", "system", false),
+            ("sys.argv", "system", false),
+            ("sys.", "system", false),
+            ("os.environ", "system", false),
+            ("platform.", "system", false),
+            ("clipboard", "system", false),
+ 
+            // ---- UI (LVL9) ----
+            ("tk.", "ui", false),
+            ("Button(", "ui", false),
+            ("Label(", "ui", false),
+            ("Entry(", "ui", false),
+            ("Checkbutton(", "ui", false),
+            ("Scale(", "ui", false),
+            ("mainloop(", "ui", false),
+            (".grid(", "ui", false),
+            (".pack(", "ui", false),
+            ("bind(", "ui", false),
+ 
+            // ---- DATA (LVL5) ----
+            (".append(", "data", false),
+            (".extend(", "data", false),
+            (".insert(", "data", false),
+            (".remove(", "data", false),
+            (".pop(", "data", false),
+            (".sort(", "data", false),
+            (".reverse(", "data", false),
+            (".keys(", "data", false),
+            (".values(", "data", false),
+            (".items(", "data", false),
+            (".get(", "data", false),
+            (".update(", "data", false),
+            (".union(", "data", false),
+            (".intersection(", "data", false),
+            (".add(", "data", false),
+ 
+            // ---- TEXT (LVL6) ----
+            ("f\"", "text", false), ("f'", "text", false),
+            ("print(", "text", false),
+            (".upper(", "text", false),
+            (".lower(", "text", false),
+            (".strip(", "text", false),
+            (".replace(", "text", false),
+            (".split(", "text", false),
+            (".join(", "text", false),
+            (".find(", "text", false),
+            (".index(", "text", false),
+            (".startswith(", "text", false),
+            (".endswith(", "text", false),
+            (".format(", "text", false),
+ 
+            // ---- MATH (LVL7) ----
+            ("math.", "math", false),
+            ("abs(", "math", false),
+            ("round(", "math", false),
+            ("min(", "math", false),
+            ("max(", "math", false),
+            ("sum(", "math", false),
+            ("randint(", "math", false),
+            ("random.random(", "math", false),
+            ("choice(", "math", false),
+            ("shuffle(", "math", false),
+            ("sqrt(", "math", false),
+ 
+            // ---- VARIABLES (LVL2) - checked last among positives, since
+            //      True/False/None/int()/str() etc. are common inside other
+            //      categories' lines too, and we want those more specific
+            //      rules to win first. ----
+            ("True", "variables", false),
+            ("False", "variables", false),
+            ("None", "variables", false),
+            ("int(", "variables", false),
+            ("float(", "variables", false),
+            ("str(", "variables", false),
+            ("bool(", "variables", false),
+        };
+ 
+        public static string Classify(string codeLine)
+        {
+            string trimmed = codeLine.TrimStart();
+            if (trimmed.StartsWith("@")) return "functions"; // decorator
+ 
+            foreach (var (pat, cat, wordStart) in Rules)
+            {
+                if (wordStart)
+                {
+                    if (Regex.IsMatch(trimmed, $@"^{Regex.Escape(pat.TrimEnd())}(\b|\()")) return cat;
+                }
+                else
+                {
+                    if (trimmed.Contains(pat)) return cat;
                 }
             }
-            selecting = true;
-            selectStart = e.Location;
-            selectEnd = e.Location;
-            DeselectAll();
-            Invalidate();
+ 
+            // Fallback: anything that looks like an assignment is VARIABLES.
+            if (trimmed.Contains("+=") || trimmed.Contains("-=") || trimmed.Contains("*=") || trimmed.Contains("/="))
+                return "variables";
+            if (Regex.IsMatch(trimmed, @"(?<![=!<>])=(?!=)"))
+                return "variables";
+ 
+            return "grey";
         }
-        else if (e.Button == MouseButtons.Right)
-            contextMenu.Show(this, e.Location);
-        base.OnMouseDown(e);
+ 
+        /// <summary>
+        /// Not used by the Python parser (which never emits BracketNode), kept
+        /// only so Renderer's dormant inline-reporter/boolean drawing code
+        /// (left over from Scratch mode, harmless dead code for now) compiles.
+        /// </summary>
+        public static string? ClassifyInline(string _) => null;
     }
-
-    protected override void OnMouseMove(MouseEventArgs e)
+ 
+    // =========================================================================
+    // Palette: the draggable "stencils" shown in the left panel, grouped by
+    // the same LVL1-LVL12 taxonomy as the classifier above. Dragging one onto
+    // the canvas inserts its Template text into the source at the drop point.
+    // =========================================================================
+    internal sealed class PaletteItem
     {
-        if (draggingBlock != null && e.Button == MouseButtons.Left)
+        public string Category;
+        public string Label;      // short name shown on the stencil
+        public string Template;   // the literal Python line(s) inserted (first line only if RequiresBody)
+        public bool RequiresBody; // true for compound statements (if/for/def/...) - a "    pass" placeholder body is inserted under it
+        public PaletteItem(string category, string label, string template, bool requiresBody = false)
         {
-            var b = draggingBlock.Bounds;
-            b.X = e.X - dragOffset.X;
-            b.Y = e.Y - dragOffset.Y;
-            draggingBlock.Bounds = b;
-            Invalidate();
+            Category = category;
+            Label = label;
+            Template = template;
+            RequiresBody = requiresBody;
         }
-        else if (selecting && e.Button == MouseButtons.Left)
-        {
-            selectEnd = e.Location;
-            Invalidate();
-        }
-        base.OnMouseMove(e);
     }
-
-    protected override void OnMouseUp(MouseEventArgs e)
+ 
+    internal static class PaletteCatalog
     {
-        if (draggingBlock != null)
+        public static readonly (string key, string display)[] Categories =
         {
-            draggingBlock.IsDragging = false;
-            SnapToGridAndBlocks(draggingBlock);
-            SaveUndoState();
-            draggingBlock = null;
-            Invalidate();
-            TriggerCodeUpdate();
-        }
-        if (selecting)
+            ("flow", "Flow"), ("variables", "Variables"), ("functions", "Functions"), ("objects", "Objects"),
+            ("data", "Data"), ("text", "Text"), ("math", "Math"), ("files", "Files"),
+            ("ui", "UI"), ("time", "Time"), ("system", "System"), ("advanced", "Advanced"),
+        };
+ 
+        public static readonly List<PaletteItem> Items = new()
         {
-            selecting = false;
-            var rect = GetSelectionRectangle();
-            if (rect.Width > 5 && rect.Height > 5)
-                foreach (var b in Blocks) b.IsSelected = rect.IntersectsWith(b.Bounds);
-            Invalidate();
-        }
-        base.OnMouseUp(e);
+            // ---- FLOW ----
+            new("flow", "if", "if condition:", requiresBody: true),
+            new("flow", "if / else", "if condition:", requiresBody: true), // else is added as a second drop; keep simple for now
+            new("flow", "for", "for item in range(10):", requiresBody: true),
+            new("flow", "while", "while condition:", requiresBody: true),
+            new("flow", "try / except", "try:", requiresBody: true),
+            new("flow", "break", "break"),
+            new("flow", "continue", "continue"),
+            new("flow", "return", "return value"),
+            new("flow", "pass", "pass"),
+ 
+            // ---- VARIABLES ----
+            new("variables", "assign", "x = 0"),
+            new("variables", "increment", "x += 1"),
+            new("variables", "True", "True"),
+            new("variables", "False", "False"),
+            new("variables", "None", "None"),
+ 
+            // ---- FUNCTIONS ----
+            new("functions", "def", "def my_function():", requiresBody: true),
+            new("functions", "lambda", "square = lambda x: x * x"),
+            new("functions", "@decorator", "@staticmethod"),
+ 
+            // ---- OBJECTS ----
+            new("objects", "class", "class MyClass:", requiresBody: true),
+            new("objects", "__init__", "def __init__(self):", requiresBody: true),
+            new("objects", "self.attr", "self.value = 0"),
+            new("objects", "super()", "super().__init__()"),
+ 
+            // ---- DATA ----
+            new("data", "list.append", "my_list.append(item)"),
+            new("data", "list.pop", "my_list.pop()"),
+            new("data", "dict[key]", "my_dict[key] = value"),
+            new("data", "dict.get", "my_dict.get(key)"),
+            new("data", "set.add", "my_set.add(item)"),
+ 
+            // ---- TEXT ----
+            new("text", "f-string", "text = f\"value: {x}\""),
+            new("text", "split", "parts = text.split(\",\")"),
+            new("text", "strip", "text = text.strip()"),
+            new("text", "join", "text = \", \".join(parts)"),
+ 
+            // ---- MATH ----
+            new("math", "arithmetic", "result = a + b"),
+            new("math", "abs", "abs(x)"),
+            new("math", "round", "round(x, 2)"),
+            new("math", "random", "random.randint(1, 10)"),
+ 
+            // ---- FILES ----
+            new("files", "open (with)", "with open(\"file.txt\") as f:", requiresBody: true),
+            new("files", "write", "f.write(text)"),
+            new("files", "read", "text = f.read()"),
+            new("files", "os.path.exists", "os.path.exists(path)"),
+ 
+            // ---- UI ----
+            new("ui", "button", "button = Button()"),
+            new("ui", "window.show", "window.show()"),
+            new("ui", "on click", "def on_click():", requiresBody: true),
+ 
+            // ---- TIME ----
+            new("time", "sleep", "time.sleep(1)"),
+            new("time", "now", "timestamp = datetime.now()"),
+ 
+            // ---- SYSTEM ----
+            new("system", "sys.exit", "sys.exit()"),
+            new("system", "sys.argv", "args = sys.argv"),
+ 
+            // ---- ADVANCED ----
+            new("advanced", "import", "import module"),
+            new("advanced", "from import", "from module import name"),
+            new("advanced", "async def", "async def handler():", requiresBody: true),
+            new("advanced", "await", "await task()"),
+        };
+ 
+        public static IEnumerable<PaletteItem> ForCategory(string category) => Items.Where(i => i.Category == category);
     }
-
-    private void SnapToGridAndBlocks(WorkspaceBlock block)
+ 
+    // =========================================================================
+    // Renderer: pure GDI+ (System.Drawing) shapes matching the Scratch 2.0
+    // puzzle-piece visual language. No SVG, no HTML, no browser control.
+    // =========================================================================
+    internal static class Renderer
     {
-        int grid = 24;
-        Point loc = block.Bounds.Location;
-        loc.X = (int)Math.Round(loc.X / (double)grid) * grid;
-        loc.Y = (int)Math.Round(loc.Y / (double)grid) * grid;
-        block.Bounds = new Rectangle(loc, block.Bounds.Size);
-
-        foreach (var other in Blocks)
+        // ----- layout constants (all in pixels @ 100% DPI) -----
+        public const float RowH = 28f;
+        public const float HatBulge = 11f;
+        public const float FooterH = 14f;
+        public const float MouthMin = 12f;
+        public const float Indent = 18f;
+        public const float LeftCutMargin = 6f;
+        public const float RightMargin = 8f;
+        public const float PadX = 10f;
+        public const float PartGap = 6f;
+        public const float Radius = 4f;
+        public const float NotchX = 14f;
+        public const float NotchW = 18f;
+        public const float NotchH = 4f;
+        public const float NotchSlant = 4f;
+        public const float InlineRowH = 20f;
+        public const float MinBlockW = 46f;
+        public const float IconSize = 13f;
+        public const float IconGap = 6f;
+ 
+        public static readonly Font BlockFont = new(FontFamily.GenericSansSerif, 9.75f, FontStyle.Bold);
+        public static readonly Font InlineFont = new(FontFamily.GenericSansSerif, 9.5f, FontStyle.Regular);
+ 
+        // =====================================================================
+        // PASS 1: measure (bottom-up), caches sizes on each BlockNode
+        // =====================================================================
+ 
+        /// <summary>Extra vertical breathing room placed above a "starter" block (Hat, or a class/def C-block) so separate scripts don't look welded together - skipped for the very first block in a stack.</summary>
+        public const float StarterGap = 18f;
+ 
+        private static bool IsStarter(BlockNode b) => b.Shape == BlockShape.Hat || (b.Shape == BlockShape.CBlock && b.HatTop);
+ 
+        public static void MeasureStack(List<BlockNode> stack, Graphics g, out float width, out float height)
         {
-            if (other == block) continue;
-            Point otherBottomCenter = new Point(other.Bounds.X + other.Bounds.Width / 2, other.Bounds.Bottom);
-            Point blockTopCenter = new Point(block.Bounds.X + block.Bounds.Width / 2, block.Bounds.Top);
-            if (Math.Abs(otherBottomCenter.X - blockTopCenter.X) < SnapDistance &&
-                Math.Abs(otherBottomCenter.Y - blockTopCenter.Y) < SnapDistance)
+            float w = 0, h = 0;
+            for (int i = 0; i < stack.Count; i++)
             {
-                block.Bounds = new Rectangle(
-                    other.Bounds.X + (other.Bounds.Width - block.Bounds.Width) / 2,
-                    other.Bounds.Bottom,
-                    block.Bounds.Width,
-                    block.Bounds.Height);
-                break;
+                var b = stack[i];
+                Measure(b, g);
+                if (i > 0 && IsStarter(b)) h += StarterGap;
+                w = Math.Max(w, b.W);
+                h += b.H;
+            }
+            width = w;
+            height = h;
+        }
+ 
+        private static float HeaderRowWidth(List<Node> nodes, Graphics g)
+            => Math.Max(MeasureInlineRow(nodes, g) + PadX * 2, MinBlockW);
+ 
+        private static void Measure(BlockNode b, Graphics g)
+        {
+            float headerW = HeaderRowWidth(b.Header, g);
+ 
+            switch (b.Shape)
+            {
+                case BlockShape.Hat:
+                    b.HeaderH = RowH + HatBulge;
+                    b.W = headerW;
+                    b.H = b.HeaderH;
+                    return;
+ 
+                case BlockShape.Command:
+                case BlockShape.Cap:
+                    b.HeaderH = RowH;
+                    b.W = headerW;
+                    b.H = RowH;
+                    return;
+ 
+                case BlockShape.CBlock:
+                    b.HeaderH = RowH + (b.HatTop ? HatBulge : 0f);
+                    b.FooterH = FooterH;
+                    float totalH = b.HeaderH;
+                    float overallMaxW = headerW;
+ 
+                    b.MouthW.Clear();
+                    b.MouthH.Clear();
+                    b.ContinuationHeaderH.Clear();
+                    b.BarW.Clear();
+ 
+                    for (int m = 0; m < b.Mouths.Count; m++)
+                    {
+                        MeasureStack(b.Mouths[m], g, out float mw, out float mh);
+                        if (b.Mouths[m].Count == 0) mh = MouthMin;
+                        b.MouthW.Add(mw);
+                        b.MouthH.Add(mh);
+                        totalH += mh;
+ 
+                        // The bar directly above THIS mouth (header for m==0,
+                        // otherwise the continuation before it) is sized to
+                        // fit its own text AND this specific mouth - not the
+                        // widest mouth anywhere in the block.
+                        List<Node> ownText = (m == 0) ? b.Header : b.ContinuationHeaders[m - 1];
+                        float barW = Math.Max(HeaderRowWidth(ownText, g), Indent + mw + RightMargin);
+                        b.BarW.Add(barW);
+                        overallMaxW = Math.Max(overallMaxW, barW);
+ 
+                        if (m < b.ContinuationHeaders.Count)
+                        {
+                            b.ContinuationHeaderH.Add(RowH);
+                            totalH += RowH;
+                        }
+                    }
+ 
+                    // Footer has no text of its own - it just needs to fit
+                    // under whatever the LAST mouth needs.
+                    float lastMouthW = b.MouthW.Count > 0 ? b.MouthW[^1] : 0f;
+                    b.FooterW = Math.Max(MinBlockW, Indent + lastMouthW + RightMargin);
+                    overallMaxW = Math.Max(overallMaxW, b.FooterW);
+ 
+                    totalH += b.FooterH;
+                    b.W = overallMaxW; // bounding width other blocks stack against
+                    b.H = totalH;
+                    return;
             }
         }
-    }
-
-    private void DeselectAll() { foreach (var b in Blocks) b.IsSelected = false; }
-
-    private void TriggerCodeUpdate() => CodeChanged?.Invoke();
-
-    private static bool IsDarkColor(Color c) => (c.R * 0.299 + c.G * 0.587 + c.B * 0.114) < 140;
-
-    public void ClearAll()
-    {
-        SaveUndoState();
-        Blocks.Clear();
-        Invalidate();
-        TriggerCodeUpdate();
-    }
-
-    public string GeneratePython()
-    {
-        if (Blocks.Count == 0) return "# Drag blocks here to build your Python program\n";
-        var sorted = Blocks.OrderBy(b => b.Bounds.Y).ThenBy(b => b.Bounds.X).ToList();
-        var sb = new StringBuilder();
-        int lastY = -1;
-        foreach (var block in sorted)
+ 
+        private static float MeasureInlineRow(List<Node> nodes, Graphics g)
         {
-            if (lastY >= 0 && block.Bounds.Y > lastY + 30) sb.AppendLine();
-            string py = block.Definition.PythonTemplate;
-            for (int i = 0; i < block.ArgValues.Length; i++)
-                py = py.Replace("{" + i + "}", block.ArgValues[i]);
-            if (block.Definition.IsCBlock)
+            float x = 0;
+            bool first = true;
+            foreach (var n in nodes)
             {
-                sb.AppendLine(py);
-                sb.AppendLine("    pass");
+                if (!first) x += PartGap;
+                first = false;
+                x += MeasureNode(n, g);
             }
-            else sb.AppendLine(py);
-            lastY = block.Bounds.Bottom;
+            return x;
         }
-        return sb.ToString();
-    }
-}
-
-// ── Main Form ─
-class MainForm : Form
-{
-    private GradientPanel topPanel, tabsPanel, bottomPanel;
-    private TextBox searchBox; // plain square
-    private TableLayoutPanel categoryGrid;
-    private FlowLayoutPanel subCategoryPanel;
-    private WorkspacePanel workspacePanel;
-    private RichTextBox pythonCodeBox;
-    private Label statusLabel;
-    private Button runButton; // we'll put run button in top panel maybe
-    private List<CategoryInfo> categories;
-    private CategoryInfo selectedCategory;
-    private SplitContainer outerSplitter, innerSplitter;
-
-    public MainForm()
-    {
-        Text = "SoftwareBuilder – Visual Python Programming";
-        Size = new Size(1400, 820);
-        MinimumSize = new Size(1000, 650);
-        BackColor = Color.FromArgb(0xE6, 0xE8, 0xE8);
-        SetAppIcon();
-        InitializeCategories();
-        BuildUI();
-        CenterToScreen();
-    }
-
-    private void SetAppIcon() { /* ... same as before ... */ }
-
-    // Complete 12 categories (exactly as in previous full code)
-    private void InitializeCategories()
-    {
-        categories = new List<CategoryInfo>
+ 
+        private const float PillPadH = 7f; // horizontal padding inside a literal/variable pill (each side)
+ 
+        private static float MeasureNode(Node n, Graphics g)
         {
-            new(BlockCategory.Flow, "FLOW", Color.FromArgb(0xE1,0xA9,0x1A), "flow") { SubCategories = {
-                new("Execution") { Blocks = {
-                    new("pass", BlockShape.Stack, BlockCategory.Flow, "Execution", Color.FromArgb(0xE1,0xA9,0x1A), "pass"),
-                    new("return", BlockShape.Stack, BlockCategory.Flow, "Execution", Color.FromArgb(0xE1,0xA9,0x1A), "return {0}", false, new[]{"None"}),
-                    new("yield", BlockShape.Stack, BlockCategory.Flow, "Execution", Color.FromArgb(0xE1,0xA9,0x1A), "yield {0}", false, new[]{"value"})
-                }},
-                new("Conditions") { Blocks = {
-                    new("if", BlockShape.Stack, BlockCategory.Flow, "Conditions", Color.FromArgb(0xE1,0xA9,0x1A), "if {0}:", true, new[]{"True"}),
-                    new("elif", BlockShape.Stack, BlockCategory.Flow, "Conditions", Color.FromArgb(0xE1,0xA9,0x1A), "elif {0}:", true, new[]{"True"}),
-                    new("else", BlockShape.Stack, BlockCategory.Flow, "Conditions", Color.FromArgb(0xE1,0xA9,0x1A), "else:", true),
-                    new("match", BlockShape.Stack, BlockCategory.Flow, "Conditions", Color.FromArgb(0xE1,0xA9,0x1A), "match {0}:", true, new[]{"value"})
-                }},
-                new("Loops") { Blocks = {
-                    new("for", BlockShape.Stack, BlockCategory.Flow, "Loops", Color.FromArgb(0xE1,0xA9,0x1A), "for {0} in {1}:", true, new[]{"i","range(10)"}),
-                    new("while", BlockShape.Stack, BlockCategory.Flow, "Loops", Color.FromArgb(0xE1,0xA9,0x1A), "while {0}:", true, new[]{"True"}),
-                    new("break", BlockShape.Stack, BlockCategory.Flow, "Loops", Color.FromArgb(0xE1,0xA9,0x1A), "break"),
-                    new("continue", BlockShape.Stack, BlockCategory.Flow, "Loops", Color.FromArgb(0xE1,0xA9,0x1A), "continue")
-                }},
-                new("Iteration Helpers") { Blocks = {
-                    new("range()", BlockShape.Reporter, BlockCategory.Flow, "Iteration Helpers", Color.FromArgb(0xE1,0xA9,0x1A), "range({0})", false, new[]{"10"}),
-                    new("enumerate()", BlockShape.Reporter, BlockCategory.Flow, "Iteration Helpers", Color.FromArgb(0xE1,0xA9,0x1A), "enumerate({0})", false, new[]{"list"}),
-                    new("zip()", BlockShape.Reporter, BlockCategory.Flow, "Iteration Helpers", Color.FromArgb(0xE1,0xA9,0x1A), "zip({0},{1})", false, new[]{"a","b"}),
-                    new("reversed()", BlockShape.Reporter, BlockCategory.Flow, "Iteration Helpers", Color.FromArgb(0xE1,0xA9,0x1A), "reversed({0})", false, new[]{"seq"})
-                }},
-                new("Exceptions") { Blocks = {
-                    new("try", BlockShape.Stack, BlockCategory.Flow, "Exceptions", Color.FromArgb(0xE1,0xA9,0x1A), "try:", true),
-                    new("except", BlockShape.Stack, BlockCategory.Flow, "Exceptions", Color.FromArgb(0xE1,0xA9,0x1A), "except {0}:", true, new[]{"Exception"}),
-                    new("finally", BlockShape.Stack, BlockCategory.Flow, "Exceptions", Color.FromArgb(0xE1,0xA9,0x1A), "finally:", true),
-                    new("raise", BlockShape.Stack, BlockCategory.Flow, "Exceptions", Color.FromArgb(0xE1,0xA9,0x1A), "raise {0}", false, new[]{"Exception()"})
-                }}
-            }},
-            // ... copy the rest of the 11 categories from the previous complete code
-            new(BlockCategory.Variables, "VARIABLES", Color.FromArgb(0x4A,0x6C,0xD4), "variables") { SubCategories = {
-                new("Assignment") { Blocks = {
-                    new("=", BlockShape.Stack, BlockCategory.Variables, "Assignment", Color.FromArgb(0x4A,0x6C,0xD4), "{0} = {1}", false, new[]{"x","0"}),
-                    new("+=", BlockShape.Stack, BlockCategory.Variables, "Assignment", Color.FromArgb(0x4A,0x6C,0xD4), "{0} += {1}", false, new[]{"x","1"}),
-                    new("-=", BlockShape.Stack, BlockCategory.Variables, "Assignment", Color.FromArgb(0x4A,0x6C,0xD4), "{0} -= {1}", false, new[]{"x","1"}),
-                    new("*=", BlockShape.Stack, BlockCategory.Variables, "Assignment", Color.FromArgb(0x4A,0x6C,0xD4), "{0} *= {1}", false, new[]{"x","2"}),
-                    new("/=", BlockShape.Stack, BlockCategory.Variables, "Assignment", Color.FromArgb(0x4A,0x6C,0xD4), "{0} /= {1}", false, new[]{"x","2"})
-                }},
-                new("Types") { Blocks = {
-                    new("int", BlockShape.Reporter, BlockCategory.Variables, "Types", Color.FromArgb(0x4A,0x6C,0xD4), "int({0})", false, new[]{"0"}),
-                    new("float", BlockShape.Reporter, BlockCategory.Variables, "Types", Color.FromArgb(0x4A,0x6C,0xD4), "float({0})", false, new[]{"0.0"}),
-                    new("str", BlockShape.Reporter, BlockCategory.Variables, "Types", Color.FromArgb(0x4A,0x6C,0xD4), "str({0})", false, new[]{"\"\""}),
-                    new("bool", BlockShape.Reporter, BlockCategory.Variables, "Types", Color.FromArgb(0x4A,0x6C,0xD4), "bool({0})", false, new[]{"True"}),
-                    new("list", BlockShape.Reporter, BlockCategory.Variables, "Types", Color.FromArgb(0x4A,0x6C,0xD4), "list({0})", false, new[]{"[]"}),
-                    new("dict", BlockShape.Reporter, BlockCategory.Variables, "Types", Color.FromArgb(0x4A,0x6C,0xD4), "dict({0})", false, new[]{"{}"})
-                }},
-                new("Constants") { Blocks = {
-                    new("True", BlockShape.Boolean, BlockCategory.Variables, "Constants", Color.FromArgb(0x4A,0x6C,0xD4), "True"),
-                    new("False", BlockShape.Boolean, BlockCategory.Variables, "Constants", Color.FromArgb(0x4A,0x6C,0xD4), "False"),
-                    new("None", BlockShape.Reporter, BlockCategory.Variables, "Constants", Color.FromArgb(0x4A,0x6C,0xD4), "None")
-                }},
-                new("Conversion") { Blocks = {
-                    new("int()", BlockShape.Reporter, BlockCategory.Variables, "Conversion", Color.FromArgb(0x4A,0x6C,0xD4), "int({0})", false, new[]{"0"}),
-                    new("float()", BlockShape.Reporter, BlockCategory.Variables, "Conversion", Color.FromArgb(0x4A,0x6C,0xD4), "float({0})", false, new[]{"0"}),
-                    new("str()", BlockShape.Reporter, BlockCategory.Variables, "Conversion", Color.FromArgb(0x4A,0x6C,0xD4), "str({0})", false, new[]{"0"}),
-                    new("bool()", BlockShape.Reporter, BlockCategory.Variables, "Conversion", Color.FromArgb(0x4A,0x6C,0xD4), "bool({0})", false, new[]{"0"})
-                }}
-            }},
-            new(BlockCategory.Functions, "FUNCTIONS", Color.FromArgb(0x8A,0x55,0xD7), "functions") { SubCategories = {
-                new("Definition") { Blocks = {
-                    new("def", BlockShape.Hat, BlockCategory.Functions, "Definition", Color.FromArgb(0x8A,0x55,0xD7), "def {0}({1}):", true, new[]{"my_func",""}),
-                    new("lambda", BlockShape.Reporter, BlockCategory.Functions, "Definition", Color.FromArgb(0x8A,0x55,0xD7), "lambda {0}: {1}", false, new[]{"x","x"})
-                }},
-                new("Return") { Blocks = { new("return", BlockShape.Stack, BlockCategory.Functions, "Return", Color.FromArgb(0x8A,0x55,0xD7), "return {0}", false, new[]{"None"}) }},
-                new("Parameters") { Blocks = {
-                    new("*args", BlockShape.Reporter, BlockCategory.Functions, "Parameters", Color.FromArgb(0x8A,0x55,0xD7), "*args"),
-                    new("**kwargs", BlockShape.Reporter, BlockCategory.Functions, "Parameters", Color.FromArgb(0x8A,0x55,0xD7), "**kwargs"),
-                    new("default", BlockShape.Stack, BlockCategory.Functions, "Parameters", Color.FromArgb(0x8A,0x55,0xD7), "{0} = {1}", false, new[]{"param","value"})
-                }},
-                new("Scope") { Blocks = {
-                    new("global", BlockShape.Stack, BlockCategory.Functions, "Scope", Color.FromArgb(0x8A,0x55,0xD7), "global {0}", false, new[]{"x"}),
-                    new("nonlocal", BlockShape.Stack, BlockCategory.Functions, "Scope", Color.FromArgb(0x8A,0x55,0xD7), "nonlocal {0}", false, new[]{"x"})
-                }},
-                new("Decorators") { Blocks = {
-                    new("@property", BlockShape.Stack, BlockCategory.Functions, "Decorators", Color.FromArgb(0x8A,0x55,0xD7), "@property"),
-                    new("@staticmethod", BlockShape.Stack, BlockCategory.Functions, "Decorators", Color.FromArgb(0x8A,0x55,0xD7), "@staticmethod"),
-                    new("@classmethod", BlockShape.Stack, BlockCategory.Functions, "Decorators", Color.FromArgb(0x8A,0x55,0xD7), "@classmethod")
-                }}
-            }},
-            new(BlockCategory.Objects, "OBJECTS", Color.FromArgb(0x63,0x2D,0x99), "objects") { SubCategories = {
-                new("Classes") { Blocks = {
-                    new("class", BlockShape.Hat, BlockCategory.Objects, "Classes", Color.FromArgb(0x63,0x2D,0x99), "class {0}:", true, new[]{"MyClass"}),
-                    new("self", BlockShape.Reporter, BlockCategory.Objects, "Classes", Color.FromArgb(0x63,0x2D,0x99), "self"),
-                    new("__init__", BlockShape.Stack, BlockCategory.Objects, "Classes", Color.FromArgb(0x63,0x2D,0x99), "def __init__(self{0}):", true, new[]{""})
-                }},
-                new("Attributes") { Blocks = {
-                    new("getattr", BlockShape.Reporter, BlockCategory.Objects, "Attributes", Color.FromArgb(0x63,0x2D,0x99), "getattr({0},{1})", false, new[]{"obj","'attr'"}),
-                    new("setattr", BlockShape.Stack, BlockCategory.Objects, "Attributes", Color.FromArgb(0x63,0x2D,0x99), "setattr({0},{1},{2})", false, new[]{"obj","'attr'","val"})
-                }},
-                new("Methods") { Blocks = {
-                    new("instance method", BlockShape.Stack, BlockCategory.Objects, "Methods", Color.FromArgb(0x63,0x2D,0x99), "def {0}(self):", true, new[]{"method"}),
-                    new("class method", BlockShape.Stack, BlockCategory.Objects, "Methods", Color.FromArgb(0x63,0x2D,0x99), "@classmethod\ndef {0}(cls):", true, new[]{"method"}),
-                    new("static method", BlockShape.Stack, BlockCategory.Objects, "Methods", Color.FromArgb(0x63,0x2D,0x99), "@staticmethod\ndef {0}():", true, new[]{"method"})
-                }},
-                new("Inheritance") { Blocks = {
-                    new("super()", BlockShape.Reporter, BlockCategory.Objects, "Inheritance", Color.FromArgb(0x63,0x2D,0x99), "super()"),
-                    new("override", BlockShape.Stack, BlockCategory.Objects, "Inheritance", Color.FromArgb(0x63,0x2D,0x99), "def {0}(self):\n    super().{0}()", true, new[]{"method"})
-                }}
-            }},
-            new(BlockCategory.Data, "DATA", Color.FromArgb(0x5C,0xB7,0x12), "data") { SubCategories = {
-                new("Lists") { Blocks = {
-                    new("append()", BlockShape.Stack, BlockCategory.Data, "Lists", Color.FromArgb(0x5C,0xB7,0x12), "{0}.append({1})", false, new[]{"lst","item"}),
-                    new("extend()", BlockShape.Stack, BlockCategory.Data, "Lists", Color.FromArgb(0x5C,0xB7,0x12), "{0}.extend({1})", false, new[]{"lst","[]"}),
-                    new("insert()", BlockShape.Stack, BlockCategory.Data, "Lists", Color.FromArgb(0x5C,0xB7,0x12), "{0}.insert({1},{2})", false, new[]{"lst","0","item"}),
-                    new("remove()", BlockShape.Stack, BlockCategory.Data, "Lists", Color.FromArgb(0x5C,0xB7,0x12), "{0}.remove({1})", false, new[]{"lst","item"}),
-                    new("pop()", BlockShape.Reporter, BlockCategory.Data, "Lists", Color.FromArgb(0x5C,0xB7,0x12), "{0}.pop({1})", false, new[]{"lst","-1"}),
-                    new("sort()", BlockShape.Stack, BlockCategory.Data, "Lists", Color.FromArgb(0x5C,0xB7,0x12), "{0}.sort()", false, new[]{"lst"}),
-                    new("reverse()", BlockShape.Stack, BlockCategory.Data, "Lists", Color.FromArgb(0x5C,0xB7,0x12), "{0}.reverse()", false, new[]{"lst"})
-                }},
-                new("Dictionaries") { Blocks = {
-                    new("keys()", BlockShape.Reporter, BlockCategory.Data, "Dictionaries", Color.FromArgb(0x5C,0xB7,0x12), "{0}.keys()", false, new[]{"d"}),
-                    new("values()", BlockShape.Reporter, BlockCategory.Data, "Dictionaries", Color.FromArgb(0x5C,0xB7,0x12), "{0}.values()", false, new[]{"d"}),
-                    new("items()", BlockShape.Reporter, BlockCategory.Data, "Dictionaries", Color.FromArgb(0x5C,0xB7,0x12), "{0}.items()", false, new[]{"d"}),
-                    new("get()", BlockShape.Reporter, BlockCategory.Data, "Dictionaries", Color.FromArgb(0x5C,0xB7,0x12), "{0}.get({1})", false, new[]{"d","'key'"}),
-                    new("update()", BlockShape.Stack, BlockCategory.Data, "Dictionaries", Color.FromArgb(0x5C,0xB7,0x12), "{0}.update({1})", false, new[]{"d","{}"}),
-                    new("pop()", BlockShape.Reporter, BlockCategory.Data, "Dictionaries", Color.FromArgb(0x5C,0xB7,0x12), "{0}.pop({1})", false, new[]{"d","'key'"})
-                }},
-                new("Sets") { Blocks = {
-                    new("add()", BlockShape.Stack, BlockCategory.Data, "Sets", Color.FromArgb(0x5C,0xB7,0x12), "{0}.add({1})", false, new[]{"s","item"}),
-                    new("remove()", BlockShape.Stack, BlockCategory.Data, "Sets", Color.FromArgb(0x5C,0xB7,0x12), "{0}.remove({1})", false, new[]{"s","item"}),
-                    new("union()", BlockShape.Reporter, BlockCategory.Data, "Sets", Color.FromArgb(0x5C,0xB7,0x12), "{0}.union({1})", false, new[]{"s1","s2"}),
-                    new("intersection()", BlockShape.Reporter, BlockCategory.Data, "Sets", Color.FromArgb(0x5C,0xB7,0x12), "{0}.intersection({1})", false, new[]{"s1","s2"})
-                }},
-                new("Tuples") { Blocks = {
-                    new("indexing", BlockShape.Reporter, BlockCategory.Data, "Tuples", Color.FromArgb(0x5C,0xB7,0x12), "{0}[{1}]", false, new[]{"tup","0"}),
-                    new("unpacking", BlockShape.Stack, BlockCategory.Data, "Tuples", Color.FromArgb(0x5C,0xB7,0x12), "{0} = {1}", false, new[]{"a,b","tup"})
-                }}
-            }},
-            new(BlockCategory.Text, "TEXT", Color.FromArgb(0xEE,0x7D,0x16), "text") { SubCategories = {
-                new("Creation") { Blocks = {
-                    new("str()", BlockShape.Reporter, BlockCategory.Text, "Creation", Color.FromArgb(0xEE,0x7D,0x16), "str({0})", false, new[]{"0"}),
-                    new("f-string", BlockShape.Reporter, BlockCategory.Text, "Creation", Color.FromArgb(0xEE,0x7D,0x16), "f\"{0}\"", false, new[]{"{value}"})
-                }},
-                new("Manipulation") { Blocks = {
-                    new("upper()", BlockShape.Reporter, BlockCategory.Text, "Manipulation", Color.FromArgb(0xEE,0x7D,0x16), "{0}.upper()", false, new[]{"s"}),
-                    new("lower()", BlockShape.Reporter, BlockCategory.Text, "Manipulation", Color.FromArgb(0xEE,0x7D,0x16), "{0}.lower()", false, new[]{"s"}),
-                    new("strip()", BlockShape.Reporter, BlockCategory.Text, "Manipulation", Color.FromArgb(0xEE,0x7D,0x16), "{0}.strip()", false, new[]{"s"}),
-                    new("replace()", BlockShape.Reporter, BlockCategory.Text, "Manipulation", Color.FromArgb(0xEE,0x7D,0x16), "{0}.replace({1},{2})", false, new[]{"s","'old'","'new'"}),
-                    new("split()", BlockShape.Reporter, BlockCategory.Text, "Manipulation", Color.FromArgb(0xEE,0x7D,0x16), "{0}.split({1})", false, new[]{"s","','"}),
-                    new("join()", BlockShape.Reporter, BlockCategory.Text, "Manipulation", Color.FromArgb(0xEE,0x7D,0x16), "{0}.join({1})", false, new[]{"','","lst"})
-                }},
-                new("Search") { Blocks = {
-                    new("find()", BlockShape.Reporter, BlockCategory.Text, "Search", Color.FromArgb(0xEE,0x7D,0x16), "{0}.find({1})", false, new[]{"s","'sub'"}),
-                    new("index()", BlockShape.Reporter, BlockCategory.Text, "Search", Color.FromArgb(0xEE,0x7D,0x16), "{0}.index({1})", false, new[]{"s","'sub'"}),
-                    new("startswith()", BlockShape.Boolean, BlockCategory.Text, "Search", Color.FromArgb(0xEE,0x7D,0x16), "{0}.startswith({1})", false, new[]{"s","'pre'"}),
-                    new("endswith()", BlockShape.Boolean, BlockCategory.Text, "Search", Color.FromArgb(0xEE,0x7D,0x16), "{0}.endswith({1})", false, new[]{"s","'suf'"}),
-                    new("in", BlockShape.Boolean, BlockCategory.Text, "Search", Color.FromArgb(0xEE,0x7D,0x16), "{0} in {1}", false, new[]{"'sub'","s"})
-                }},
-                new("Formatting") { Blocks = {
-                    new("format()", BlockShape.Reporter, BlockCategory.Text, "Formatting", Color.FromArgb(0xEE,0x7D,0x16), "{0}.format({1})", false, new[]{"'{}'","val"}),
-                    new("f-string", BlockShape.Reporter, BlockCategory.Text, "Formatting", Color.FromArgb(0xEE,0x7D,0x16), "f'{0}'", false, new[]{"{var}"})
-                }}
-            }},
-            new(BlockCategory.Math, "MATH", Color.FromArgb(0x2C,0xA5,0xE2), "math") { SubCategories = {
-                new("Arithmetic") { Blocks = {
-                    new("+", BlockShape.Reporter, BlockCategory.Math, "Arithmetic", Color.FromArgb(0x2C,0xA5,0xE2), "({0} + {1})", false, new[]{"a","b"}),
-                    new("-", BlockShape.Reporter, BlockCategory.Math, "Arithmetic", Color.FromArgb(0x2C,0xA5,0xE2), "({0} - {1})", false, new[]{"a","b"}),
-                    new("*", BlockShape.Reporter, BlockCategory.Math, "Arithmetic", Color.FromArgb(0x2C,0xA5,0xE2), "({0} * {1})", false, new[]{"a","b"}),
-                    new("/", BlockShape.Reporter, BlockCategory.Math, "Arithmetic", Color.FromArgb(0x2C,0xA5,0xE2), "({0} / {1})", false, new[]{"a","b"}),
-                    new("//", BlockShape.Reporter, BlockCategory.Math, "Arithmetic", Color.FromArgb(0x2C,0xA5,0xE2), "({0} // {1})", false, new[]{"a","b"}),
-                    new("%", BlockShape.Reporter, BlockCategory.Math, "Arithmetic", Color.FromArgb(0x2C,0xA5,0xE2), "({0} % {1})", false, new[]{"a","b"}),
-                    new("**", BlockShape.Reporter, BlockCategory.Math, "Arithmetic", Color.FromArgb(0x2C,0xA5,0xE2), "({0} ** {1})", false, new[]{"a","b"})
-                }},
-                new("Built-in Math") { Blocks = {
-                    new("abs()", BlockShape.Reporter, BlockCategory.Math, "Built-in Math", Color.FromArgb(0x2C,0xA5,0xE2), "abs({0})", false, new[]{"x"}),
-                    new("round()", BlockShape.Reporter, BlockCategory.Math, "Built-in Math", Color.FromArgb(0x2C,0xA5,0xE2), "round({0})", false, new[]{"x"}),
-                    new("min()", BlockShape.Reporter, BlockCategory.Math, "Built-in Math", Color.FromArgb(0x2C,0xA5,0xE2), "min({0})", false, new[]{"a,b"}),
-                    new("max()", BlockShape.Reporter, BlockCategory.Math, "Built-in Math", Color.FromArgb(0x2C,0xA5,0xE2), "max({0})", false, new[]{"a,b"}),
-                    new("sum()", BlockShape.Reporter, BlockCategory.Math, "Built-in Math", Color.FromArgb(0x2C,0xA5,0xE2), "sum({0})", false, new[]{"lst"})
-                }},
-                new("Random") { Blocks = {
-                    new("random()", BlockShape.Reporter, BlockCategory.Math, "Random", Color.FromArgb(0x2C,0xA5,0xE2), "random.random()"),
-                    new("randint()", BlockShape.Reporter, BlockCategory.Math, "Random", Color.FromArgb(0x2C,0xA5,0xE2), "random.randint({0},{1})", false, new[]{"0","100"}),
-                    new("choice()", BlockShape.Reporter, BlockCategory.Math, "Random", Color.FromArgb(0x2C,0xA5,0xE2), "random.choice({0})", false, new[]{"lst"}),
-                    new("shuffle()", BlockShape.Stack, BlockCategory.Math, "Random", Color.FromArgb(0x2C,0xA5,0xE2), "random.shuffle({0})", false, new[]{"lst"})
-                }},
-                new("Advanced") { Blocks = {
-                    new("sin()", BlockShape.Reporter, BlockCategory.Math, "Advanced", Color.FromArgb(0x2C,0xA5,0xE2), "math.sin({0})", false, new[]{"x"}),
-                    new("cos()", BlockShape.Reporter, BlockCategory.Math, "Advanced", Color.FromArgb(0x2C,0xA5,0xE2), "math.cos({0})", false, new[]{"x"}),
-                    new("tan()", BlockShape.Reporter, BlockCategory.Math, "Advanced", Color.FromArgb(0x2C,0xA5,0xE2), "math.tan({0})", false, new[]{"x"}),
-                    new("sqrt()", BlockShape.Reporter, BlockCategory.Math, "Advanced", Color.FromArgb(0x2C,0xA5,0xE2), "math.sqrt({0})", false, new[]{"x"})
-                }}
-            }},
-            new(BlockCategory.Files, "FILES", Color.FromArgb(0x8B,0x5E,0x3C), "files") { SubCategories = {
-                new("Text Files") { Blocks = {
-                    new("open()", BlockShape.Reporter, BlockCategory.Files, "Text Files", Color.FromArgb(0x8B,0x5E,0x3C), "open({0},{1})", false, new[]{"'file.txt'","'r'"}),
-                    new("read()", BlockShape.Reporter, BlockCategory.Files, "Text Files", Color.FromArgb(0x8B,0x5E,0x3C), "{0}.read()", false, new[]{"f"}),
-                    new("readline()", BlockShape.Reporter, BlockCategory.Files, "Text Files", Color.FromArgb(0x8B,0x5E,0x3C), "{0}.readline()", false, new[]{"f"}),
-                    new("write()", BlockShape.Stack, BlockCategory.Files, "Text Files", Color.FromArgb(0x8B,0x5E,0x3C), "{0}.write({1})", false, new[]{"f","'text'"}),
-                    new("append()", BlockShape.Stack, BlockCategory.Files, "Text Files", Color.FromArgb(0x8B,0x5E,0x3C), "open({0},'a').write({1})", false, new[]{"'file.txt'","'text'"})
-                }},
-                new("Binary Files") { Blocks = {
-                    new("rb mode", BlockShape.Reporter, BlockCategory.Files, "Binary Files", Color.FromArgb(0x8B,0x5E,0x3C), "open({0},'rb')", false, new[]{"'file.bin'"}),
-                    new("wb mode", BlockShape.Reporter, BlockCategory.Files, "Binary Files", Color.FromArgb(0x8B,0x5E,0x3C), "open({0},'wb')", false, new[]{"'file.bin'"}),
-                    new("readbytes()", BlockShape.Reporter, BlockCategory.Files, "Binary Files", Color.FromArgb(0x8B,0x5E,0x3C), "{0}.read()", false, new[]{"f"}),
-                    new("writebytes()", BlockShape.Stack, BlockCategory.Files, "Binary Files", Color.FromArgb(0x8B,0x5E,0x3C), "{0}.write({1})", false, new[]{"f","b'data'"})
-                }},
-                new("File System") { Blocks = {
-                    new("exists()", BlockShape.Boolean, BlockCategory.Files, "File System", Color.FromArgb(0x8B,0x5E,0x3C), "os.path.exists({0})", false, new[]{"'path'"}),
-                    new("remove()", BlockShape.Stack, BlockCategory.Files, "File System", Color.FromArgb(0x8B,0x5E,0x3C), "os.remove({0})", false, new[]{"'file'"}),
-                    new("rename()", BlockShape.Stack, BlockCategory.Files, "File System", Color.FromArgb(0x8B,0x5E,0x3C), "os.rename({0},{1})", false, new[]{"'old'","'new'"}),
-                    new("listdir()", BlockShape.Reporter, BlockCategory.Files, "File System", Color.FromArgb(0x8B,0x5E,0x3C), "os.listdir({0})", false, new[]{"'.'"})
-                }},
-                new("Paths") { Blocks = {
-                    new("join()", BlockShape.Reporter, BlockCategory.Files, "Paths", Color.FromArgb(0x8B,0x5E,0x3C), "os.path.join({0})", false, new[]{"'a','b'"}),
-                    new("split()", BlockShape.Reporter, BlockCategory.Files, "Paths", Color.FromArgb(0x8B,0x5E,0x3C), "os.path.split({0})", false, new[]{"'path'"}),
-                    new("basename()", BlockShape.Reporter, BlockCategory.Files, "Paths", Color.FromArgb(0x8B,0x5E,0x3C), "os.path.basename({0})", false, new[]{"'path'"})
-                }}
-            }},
-            new(BlockCategory.UI, "UI", Color.FromArgb(0x0E,0x9A,0x6C), "ui") { SubCategories = {
-                new("Window") { Blocks = {
-                    new("create window", BlockShape.Stack, BlockCategory.UI, "Window", Color.FromArgb(0x0E,0x9A,0x6C), "root = tk.Tk()"),
-                    new("show", BlockShape.Stack, BlockCategory.UI, "Window", Color.FromArgb(0x0E,0x9A,0x6C), "root.mainloop()"),
-                    new("hide", BlockShape.Stack, BlockCategory.UI, "Window", Color.FromArgb(0x0E,0x9A,0x6C), "root.withdraw()")
-                }},
-                new("Controls") { Blocks = {
-                    new("button", BlockShape.Stack, BlockCategory.UI, "Controls", Color.FromArgb(0x0E,0x9A,0x6C), "tk.Button({0},text={1})", false, new[]{"root","'Click'"}),
-                    new("label", BlockShape.Stack, BlockCategory.UI, "Controls", Color.FromArgb(0x0E,0x9A,0x6C), "tk.Label({0},text={1})", false, new[]{"root","'Hello'"}),
-                    new("textbox", BlockShape.Stack, BlockCategory.UI, "Controls", Color.FromArgb(0x0E,0x9A,0x6C), "tk.Entry({0})", false, new[]{"root"}),
-                    new("checkbox", BlockShape.Stack, BlockCategory.UI, "Controls", Color.FromArgb(0x0E,0x9A,0x6C), "tk.Checkbutton({0},text={1})", false, new[]{"root","'Option'"}),
-                    new("slider", BlockShape.Stack, BlockCategory.UI, "Controls", Color.FromArgb(0x0E,0x9A,0x6C), "tk.Scale({0},from_={1},to={2})", false, new[]{"root","0","100"})
-                }},
-                new("Layout") { Blocks = {
-                    new("grid", BlockShape.Stack, BlockCategory.UI, "Layout", Color.FromArgb(0x0E,0x9A,0x6C), "{0}.grid(row={1},column={2})", false, new[]{"widget","0","0"}),
-                    new("vertical", BlockShape.Stack, BlockCategory.UI, "Layout", Color.FromArgb(0x0E,0x9A,0x6C), "{0}.pack(side=tk.TOP)", false, new[]{"widget"}),
-                    new("horizontal", BlockShape.Stack, BlockCategory.UI, "Layout", Color.FromArgb(0x0E,0x9A,0x6C), "{0}.pack(side=tk.LEFT)", false, new[]{"widget"})
-                }},
-                new("Events") { Blocks = {
-                    new("click", BlockShape.Stack, BlockCategory.UI, "Events", Color.FromArgb(0x0E,0x9A,0x6C), "{0}.bind('<Button-1>',{1})", false, new[]{"widget","callback"}),
-                    new("hover", BlockShape.Stack, BlockCategory.UI, "Events", Color.FromArgb(0x0E,0x9A,0x6C), "{0}.bind('<Enter>',{1})", false, new[]{"widget","callback"}),
-                    new("change", BlockShape.Stack, BlockCategory.UI, "Events", Color.FromArgb(0x0E,0x9A,0x6C), "{0}.bind('<Modified>',{1})", false, new[]{"widget","callback"})
-                }}
-            }},
-            new(BlockCategory.Time, "TIME", Color.FromArgb(0x2E,0x8B,0x8B), "time") { SubCategories = {
-                new("Current") { Blocks = {
-                    new("now()", BlockShape.Reporter, BlockCategory.Time, "Current", Color.FromArgb(0x2E,0x8B,0x8B), "datetime.now()"),
-                    new("timestamp()", BlockShape.Reporter, BlockCategory.Time, "Current", Color.FromArgb(0x2E,0x8B,0x8B), "time.time()")
-                }},
-                new("Sleep") { Blocks = {
-                    new("sleep()", BlockShape.Stack, BlockCategory.Time, "Sleep", Color.FromArgb(0x2E,0x8B,0x8B), "time.sleep({0})", false, new[]{"1"})
-                }},
-                new("Formatting") { Blocks = {
-                    new("strftime()", BlockShape.Reporter, BlockCategory.Time, "Formatting", Color.FromArgb(0x2E,0x8B,0x8B), "{0}.strftime({1})", false, new[]{"dt","'%Y-%m-%d'"}),
-                    new("parse", BlockShape.Reporter, BlockCategory.Time, "Formatting", Color.FromArgb(0x2E,0x8B,0x8B), "datetime.strptime({0},{1})", false, new[]{"'date'","'%Y-%m-%d'"})
-                }}
-            }},
-            new(BlockCategory.System, "SYSTEM", Color.FromArgb(0x55,0x55,0x55), "system") { SubCategories = {
-                new("OS") { Blocks = {
-                    new("platform", BlockShape.Reporter, BlockCategory.System, "OS", Color.FromArgb(0x55,0x55,0x55), "sys.platform"),
-                    new("environment", BlockShape.Reporter, BlockCategory.System, "OS", Color.FromArgb(0x55,0x55,0x55), "os.environ")
-                }},
-                new("Process") { Blocks = {
-                    new("exit()", BlockShape.Stack, BlockCategory.System, "Process", Color.FromArgb(0x55,0x55,0x55), "sys.exit({0})", false, new[]{"0"}),
-                    new("argv", BlockShape.Reporter, BlockCategory.System, "Process", Color.FromArgb(0x55,0x55,0x55), "sys.argv")
-                }},
-                new("Clipboard") { Blocks = {
-                    new("copy", BlockShape.Stack, BlockCategory.System, "Clipboard", Color.FromArgb(0x55,0x55,0x55), "pyperclip.copy({0})", false, new[]{"text"}),
-                    new("paste", BlockShape.Reporter, BlockCategory.System, "Clipboard", Color.FromArgb(0x55,0x55,0x55), "pyperclip.paste()")
-                }}
-            }},
-            new(BlockCategory.Advanced, "ADVANCED", Color.FromArgb(0x4B,0x4A,0x60), "advanced") { SubCategories = {
-                new("Imports") { Blocks = {
-                    new("import", BlockShape.Stack, BlockCategory.Advanced, "Imports", Color.FromArgb(0x4B,0x4A,0x60), "import {0}", false, new[]{"module"}),
-                    new("from", BlockShape.Stack, BlockCategory.Advanced, "Imports", Color.FromArgb(0x4B,0x4A,0x60), "from {0} import {1}", false, new[]{"module","name"})
-                }},
-                new("Async") { Blocks = {
-                    new("async", BlockShape.Stack, BlockCategory.Advanced, "Async", Color.FromArgb(0x4B,0x4A,0x60), "async def {0}():", true, new[]{"func"}),
-                    new("await", BlockShape.Stack, BlockCategory.Advanced, "Async", Color.FromArgb(0x4B,0x4A,0x60), "await {0}", false, new[]{"coro"})
-                }},
-                new("Generators") { Blocks = {
-                    new("yield", BlockShape.Stack, BlockCategory.Advanced, "Generators", Color.FromArgb(0x4B,0x4A,0x60), "yield {0}", false, new[]{"value"})
-                }},
-                new("Typing") { Blocks = {
-                    new("type hints", BlockShape.Stack, BlockCategory.Advanced, "Typing", Color.FromArgb(0x4B,0x4A,0x60), "{0}: {1} = {2}", false, new[]{"x","int","0"}),
-                    new("Optional", BlockShape.Reporter, BlockCategory.Advanced, "Typing", Color.FromArgb(0x4B,0x4A,0x60), "Optional[{0}]", false, new[]{"int"}),
-                    new("List[T]", BlockShape.Reporter, BlockCategory.Advanced, "Typing", Color.FromArgb(0x4B,0x4A,0x60), "List[{0}]", false, new[]{"int"})
-                }},
-                new("Reflection") { Blocks = {
-                    new("getattr", BlockShape.Reporter, BlockCategory.Advanced, "Reflection", Color.FromArgb(0x4B,0x4A,0x60), "getattr({0},{1})", false, new[]{"obj","'attr'"}),
-                    new("setattr", BlockShape.Stack, BlockCategory.Advanced, "Reflection", Color.FromArgb(0x4B,0x4A,0x60), "setattr({0},{1},{2})", false, new[]{"obj","'attr'","val"}),
-                    new("hasattr", BlockShape.Boolean, BlockCategory.Advanced, "Reflection", Color.FromArgb(0x4B,0x4A,0x60), "hasattr({0},{1})", false, new[]{"obj","'attr'"})
-                }},
-                new("Memory") { Blocks = {
-                    new("gc", BlockShape.Stack, BlockCategory.Advanced, "Memory", Color.FromArgb(0x4B,0x4A,0x60), "gc.collect()"),
-                    new("sys", BlockShape.Reporter, BlockCategory.Advanced, "Memory", Color.FromArgb(0x4B,0x4A,0x60), "sys.getsizeof({0})", false, new[]{"obj"})
-                }}
-            }}
-        };
-    }
-
-    // … (all previous code remains exactly the same up to MainForm.BuildUI)
-    
-    private void BuildUI()
-    {
-        // ── Top panel 63px ──
-        topPanel = new GradientPanel { Height = 63, Dock = DockStyle.Top };
-        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(4), BackColor = Color.Transparent };
-        string[] buttonNames = { "Create new", "Save Script", "Import Script", null, "Settings", "Log Viewer", "Issues", null, "Wikipedia" };
-        foreach (var name in buttonNames)
-        {
-            if (name == null) { toolbar.Controls.Add(new Panel { Width = 40, BackColor = Color.Transparent }); continue; }
-            var btn = new ToolbarButton(name, name.Replace(" ", "").ToLower());
-            btn.Click += (s, e) => { /* action placeholder */ };
-            toolbar.Controls.Add(btn);
-        }
-        // Run button at right side of top panel
-        runButton = new Button { Text = "Run", FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(0x5C,0xB7,0x12), ForeColor = Color.White, Font = FontLoader.GetFont(9f, FontStyle.Bold), Size = new Size(80,28), Anchor = AnchorStyles.Right | AnchorStyles.Top };
-        runButton.FlatAppearance.BorderSize = 0;
-        runButton.Click += (s, e) => UpdatePythonCode();
-        runButton.Location = new Point(topPanel.Width - runButton.Width - 10, 18);
-        topPanel.Controls.Add(runButton);
-        topPanel.Controls.Add(toolbar);
-        topPanel.Resize += (s, e) => runButton.Location = new Point(topPanel.Width - runButton.Width - 10, 18);
-    
-        // ── Tab Switching bar 22px ──
-        tabsPanel = new GradientPanel { Height = 22, Dock = DockStyle.Top };
-        var tabsFlow = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0), BackColor = Color.Transparent };
-        foreach (var cat in categories)
-        {
-            string tabText = cat.Name.Length >= 3 ? cat.Name.Substring(0, 3) : cat.Name;  // FIX: handle short names like "UI"
-            var tab = new Label { Text = tabText, Font = FontLoader.GetFont(7f), AutoSize = true, Margin = new Padding(4,2,4,0), ForeColor = Color.Black, BackColor = Color.Transparent };
-            tab.Click += (s, e) => OnCategorySelected(cat);
-            tabsFlow.Controls.Add(tab);
-        }
-        tabsPanel.Controls.Add(tabsFlow);
-    
-        // ── Bottom panel 35px ──
-        bottomPanel = new GradientPanel { Height = 35, Dock = DockStyle.Bottom };
-        statusLabel = new Label { Text = "  Ready – Select a category and drag blocks.", Font = FontLoader.GetFont(8f), ForeColor = Color.FromArgb(0x44,0x44,0x44), AutoSize = true, Location = new Point(8, 8) };
-        bottomPanel.Controls.Add(statusLabel);
-    
-        // ── Outer splitter ──
-        outerSplitter = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterWidth = 4 };
-    
-        // Left panel: Block Storage
-        var storagePanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(0xE6,0xE8,0xE8), Padding = new Padding(4) };
-        var storageTitle = new Label { Text = "Block Storage", Font = FontLoader.GetFont(10f, FontStyle.Bold), ForeColor = Color.FromArgb(0x5C,0x5C,0x5C), Dock = DockStyle.Top, Height = 24, TextAlign = ContentAlignment.MiddleCenter };
-        storagePanel.Controls.Add(storageTitle);
-        // Search (square)
-        searchBox = new TextBox { Dock = DockStyle.Top, Height = 24, Font = FontLoader.GetFont(9f), BorderStyle = BorderStyle.FixedSingle };
-        searchBox.TextChanged += (s, e) => PopulateSubCategories(selectedCategory);
-        storagePanel.Controls.Add(searchBox);
-        // Category grid
-        var gridContainer = new Panel { Dock = DockStyle.Top, Height = 130, BackColor = Color.Transparent };
-        categoryGrid = new TableLayoutPanel { ColumnCount = 3, RowCount = 4, Dock = DockStyle.Fill, Padding = new Padding(2) };
-        for (int i=0;i<3;i++) categoryGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
-        for (int i=0;i<4;i++) categoryGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        int idx = 0;
-        foreach (var cat in categories)
-        {
-            var btn = new CategoryButton(cat) { Dock = DockStyle.Fill };
-            categoryGrid.Controls.Add(btn, idx%3, idx/3);
-            idx++;
-        }
-        gridContainer.Controls.Add(categoryGrid);
-        storagePanel.Controls.Add(gridContainer);
-        // Sub-category list
-        subCategoryPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, BackColor = Color.FromArgb(0xE6,0xE8,0xE8), BorderStyle = BorderStyle.None };
-        storagePanel.Controls.Add(subCategoryPanel);
-        outerSplitter.Panel1.Controls.Add(storagePanel);
-    
-        // Right side: inner splitter
-        innerSplitter = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterWidth = 4 };
-    
-        var wsContainer = new Panel { Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle };
-        var wsLabel = new Label { Text = "Block Space", Font = FontLoader.GetFont(9f, FontStyle.Bold), ForeColor = Color.FromArgb(0x5C,0x5C,0x5C), BackColor = Color.FromArgb(0xCD,0xCD,0xD2), Dock = DockStyle.Top, Height = 24, TextAlign = ContentAlignment.MiddleCenter };
-        workspacePanel = new WorkspacePanel { Dock = DockStyle.Fill };
-        workspacePanel.CodeChanged += UpdatePythonCode;
-        wsContainer.Controls.Add(workspacePanel); wsContainer.Controls.Add(wsLabel);
-        innerSplitter.Panel1.Controls.Add(wsContainer);
-    
-        var codeContainer = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(0x2D,0x2D,0x2D), BorderStyle = BorderStyle.FixedSingle };
-        var codeLabel = new Label { Text = "Python Code", Font = FontLoader.GetFont(9f, FontStyle.Bold), ForeColor = Color.White, BackColor = Color.FromArgb(0x5C,0x5C,0x5C), Dock = DockStyle.Top, Height = 24, TextAlign = ContentAlignment.MiddleCenter };
-        pythonCodeBox = new RichTextBox { Dock = DockStyle.Fill, BackColor = Color.FromArgb(0x1E,0x1E,0x1E), ForeColor = Color.FromArgb(0xD4,0xD4,0xD4), Font = new Font("Consolas", 10.5f), ReadOnly = true, BorderStyle = BorderStyle.None, Text = "# Drag blocks here to build your Python program\n", WordWrap = false, ScrollBars = RichTextBoxScrollBars.Both };
-        codeContainer.Controls.Add(pythonCodeBox); codeContainer.Controls.Add(codeLabel);
-        innerSplitter.Panel2.Controls.Add(codeContainer);
-    
-        outerSplitter.Panel2.Controls.Add(innerSplitter);
-    
-        Controls.Add(outerSplitter);
-        Controls.Add(tabsPanel);
-        Controls.Add(topPanel);
-        Controls.Add(bottomPanel);
-    
-        if (categories.Count > 0)
-        {
-            selectedCategory = categories[0];
-            ((CategoryButton)categoryGrid.Controls[0]).IsSelected = true;
-            categoryGrid.Controls[0].Invalidate();
-            PopulateSubCategories(selectedCategory);
-        }
-    
-        // Safe sizing after shown
-        this.Shown += (s, args) =>
-        {
-            this.BeginInvoke((Action)(() =>
+            if (n is TextNode t)
             {
-                outerSplitter.Panel1MinSize = 200;
-                outerSplitter.Panel2MinSize = 400;
-                outerSplitter.SplitterDistance = 415;
-                innerSplitter.Panel1MinSize = 150;
-                innerSplitter.Panel2MinSize = 150;
-                int desired = innerSplitter.Width - 415;
-                innerSplitter.SplitterDistance = Math.Max(innerSplitter.Panel1MinSize,
-                    Math.Min(desired, innerSplitter.Width - innerSplitter.Panel2MinSize - innerSplitter.SplitterWidth));
-            }));
-        };
-    }
-
-
-    public void OnCategorySelected(CategoryInfo cat)
-    {
-        selectedCategory = cat;
-        PopulateSubCategories(cat);
-        foreach (Control c in categoryGrid.Controls) if (c is CategoryButton cb) cb.Invalidate();
-    }
-
-    private void PopulateSubCategories(CategoryInfo cat)
-    {
-        subCategoryPanel.Controls.Clear();
-        if (cat == null) return;
-        string filter = searchBox.Text.Trim();
-        foreach (var sub in cat.SubCategories)
+                string trimmed = t.Text.Trim();
+                if (trimmed.Length == 0) return Math.Max(4f, g.MeasureString(" ", BlockFont).Width * 0.4f);
+                return g.MeasureString(trimmed, BlockFont).Width;
+            }
+            if (n is PillNode pn)
+            {
+                return g.MeasureString(pn.Text, InlineFont).Width + PillPadH * 2f;
+            }
+            var bn = (BracketNode)n;
+            float innerW = MeasureInlineRow(bn.Children, g);
+            if (bn.Open == '[')
+            {
+                // dropdown pill: text + small arrow
+                return innerW + 22f;
+            }
+            if (bn.Open == '<')
+            {
+                return Math.Max(30f, innerW + 22f); // hexagon needs extra room for the pointed ends
+            }
+            // '(' round reporter/number slot
+            return Math.Max(22f, innerW + 16f);
+        }
+ 
+        // =====================================================================
+        // PASS 2: draw, using the cached sizes from Measure()
+        // =====================================================================
+        public static void DrawStack(List<BlockNode> stack, Graphics g, float x, float y)
         {
-            var filtered = sub.Blocks.Where(b => string.IsNullOrEmpty(filter) || b.Label.ToLower().Contains(filter.ToLower())).ToList();
-            if (!filtered.Any()) continue;
-            var squircleLabel = new SubCategorySquircle(sub.Name);
-            int w = TextRenderer.MeasureText(sub.Name, squircleLabel.Font).Width + 20;
-            squircleLabel.Width = w > 100 ? w : 100;
-            subCategoryPanel.Controls.Add(squircleLabel);
-            foreach (var b in filtered)
-                subCategoryPanel.Controls.Add(new BlockStorageItem(b));
+            float curY = y;
+            for (int i = 0; i < stack.Count; i++)
+            {
+                var b = stack[i];
+                if (i > 0 && IsStarter(b)) curY += StarterGap;
+                DrawBlock(b, g, x, curY);
+                curY += b.H;
+            }
+        }
+ 
+        private static void DrawBlock(BlockNode b, Graphics g, float x, float y)
+        {
+            var fill = PyClassifier.CategoryColors.TryGetValue(b.Category, out var c) ? c : PyClassifier.CategoryColors["grey"];
+            Color? textColor = b.TextColorOverride;
+            float textX = x + PadX;
+ 
+            switch (b.Shape)
+            {
+                case BlockShape.Hat:
+                    // DrawSimpleFace/BuildBarPath handle the HatBulge offset
+                    // internally now (archTop case) - pass the raw top y.
+                    DrawSimpleFace(g, x, y, b.W, RowH, fill, topNotch: false, bottomTab: true, hatTop: true);
+                    DrawInlineRow(b.Header, g, textX, y + HatBulge, RowH, true, textColor);
+                    break;
+ 
+                case BlockShape.Command:
+                    DrawSimpleFace(g, x, y, b.W, RowH, fill, topNotch: true, bottomTab: true, hatTop: false);
+                    DrawInlineRow(b.Header, g, textX, y, RowH, true, textColor);
+                    break;
+ 
+                case BlockShape.Cap:
+                    DrawSimpleFace(g, x, y, b.W, RowH, fill, topNotch: true, bottomTab: false, hatTop: false);
+                    DrawInlineRow(b.Header, g, textX, y, RowH, true, textColor);
+                    break;
+ 
+                case BlockShape.CBlock:
+                    DrawCBlock(b, g, x, y, fill);
+                    break;
+            }
+        }
+ 
+        private static void DrawCBlock(BlockNode b, Graphics g, float x, float y, Color fill)
+        {
+            Color? textColor = b.TextColorOverride;
+            float textX = x + PadX;
+ 
+            // ONE continuous path for the whole "C" - header bar (its own
+            // width), the narrow wall through every mouth, each continuation
+            // bar (its own width), and the footer bar, all stepped together
+            // into a single outline. This is what makes the shape read as
+            // one connected piece instead of a grid of separately-bordered
+            // rectangles (that was the "weird squares" bug from drawing each
+            // bar independently).
+            using (var outline = BuildCBlockOutlinePath(b, x, y))
+            {
+                FillWithGradientAndBorder(g, outline, fill);
+            }
+ 
+            DrawInlineRow(b.Header, g, textX, y + (b.HatTop ? HatBulge : 0f), RowH, true, textColor);
+ 
+            float cursorY = y + b.HeaderH;
+            for (int m = 0; m < b.Mouths.Count; m++)
+            {
+                float mh = b.MouthH[m];
+                DrawStack(b.Mouths[m], g, x + Indent, cursorY);
+                cursorY += mh;
+ 
+                // continuation divider bar (elif / else / except / finally), if any
+                if (m < b.ContinuationHeaders.Count)
+                {
+                    float ch = b.ContinuationHeaderH[m];
+                    DrawInlineRow(b.ContinuationHeaders[m], g, textX, cursorY, ch, true, textColor);
+                    cursorY += ch;
+                }
+            }
+            // footer occupies the remaining b.FooterH automatically (it's just
+            // the tail of the outer colored silhouette below the last mouth).
+        }
+ 
+        /// <summary>
+        /// Traces the actual "C" cross-section of a C-block as one path: the
+        /// header bar is sized to fit Mouths[0] (not the widest mouth
+        /// anywhere in the block), each elif/else/except/finally bar is sized
+        /// to fit the mouth right after it, and the footer bar is sized to
+        /// fit the last mouth - so the silhouette steps narrower or wider to
+        /// hug what's actually inside it, joined by a narrow left-wall column
+        /// through each mouth. There is deliberately no geometry to the right
+        /// of the wall during a mouth row, so that area is genuinely open
+        /// (whatever is drawn underneath shows through). Closed with the
+        /// usual notch on top (or an arch, for a class/def "starter" block)
+        /// and a tab on the bottom.
+        /// </summary>
+        private static GraphicsPath BuildCBlockOutlinePath(BlockNode b, float x, float y)
+        {
+            float r = Radius;
+            float d = r * 2f;
+            float wallRight = x + Indent;
+ 
+            float headerRight = x + b.BarW[0];
+            bool fitsHeader = b.BarW[0] > NotchX + NotchW + 4;
+ 
+            var p = new GraphicsPath();
+            p.StartFigure();
+ 
+            if (b.HatTop)
+            {
+                p.AddArc(new RectangleF(x, y, b.BarW[0], HatBulge * 2f), 180, 180); // peaks at y, lands at y+HatBulge
+            }
+            else
+            {
+                p.AddArc(x, y, d, d, 180, 90); // top-left corner
+ 
+                if (fitsHeader)
+                {
+                    p.AddLine(x + r, y, x + NotchX, y);
+                    p.AddLine(x + NotchX, y, x + NotchX + NotchSlant, y + NotchH);
+                    p.AddLine(x + NotchX + NotchSlant, y + NotchH, x + NotchX + NotchW - NotchSlant, y + NotchH);
+                    p.AddLine(x + NotchX + NotchW - NotchSlant, y + NotchH, x + NotchX + NotchW, y);
+                }
+ 
+                p.AddArc(headerRight - d, y, d, d, 270, 90); // top-right corner of the header bar
+            }
+ 
+            float curY = y + b.HeaderH;
+            float curRight = headerRight;
+ 
+            for (int m = 0; m < b.Mouths.Count; m++)
+            {
+                float mouthBottom = curY + b.MouthH[m];
+                p.AddLine(curRight, curY, wallRight, curY);         // step inward: top of the mouth
+                p.AddLine(wallRight, curY, wallRight, mouthBottom); // down the narrow inner wall
+                curY = mouthBottom;
+ 
+                if (m < b.ContinuationHeaders.Count)
+                {
+                    float contRight = x + b.BarW[m + 1];
+                    float contBottom = curY + b.ContinuationHeaderH[m];
+                    p.AddLine(wallRight, curY, contRight, curY);       // step back out: this continuation's own width
+                    p.AddLine(contRight, curY, contRight, contBottom); // down through the continuation bar
+                    curY = contBottom;
+                    curRight = contRight;
+                }
+            }
+ 
+            float footerRight = x + b.FooterW;
+            float footerBottom = curY + b.FooterH;
+            bool fitsFooter = b.FooterW > NotchX + NotchW + 4;
+ 
+            p.AddLine(wallRight, curY, footerRight, curY);
+            p.AddLine(footerRight, curY, footerRight, footerBottom);
+ 
+            p.AddArc(footerRight - d, footerBottom - d, d, d, 0, 90); // bottom-right corner
+ 
+            if (fitsFooter)
+            {
+                p.AddLine(footerRight - r, footerBottom, x + NotchX + NotchW, footerBottom);
+                p.AddLine(x + NotchX + NotchW, footerBottom, x + NotchX + NotchW - NotchSlant, footerBottom + NotchH);
+                p.AddLine(x + NotchX + NotchW - NotchSlant, footerBottom + NotchH, x + NotchX + NotchSlant, footerBottom + NotchH);
+                p.AddLine(x + NotchX + NotchSlant, footerBottom + NotchH, x + NotchX, footerBottom);
+            }
+ 
+            p.AddArc(x, footerBottom - d, d, d, 90, 90); // bottom-left corner
+            p.CloseFigure(); // implicit straight left edge, full height, back to the start
+            return p;
+        }
+ 
+        /// <summary>
+        /// NOTE: icons are intentionally not drawn on blocks anymore - kept
+        /// here (and DrawCategoryIcon below) only so a future category-legend
+        /// / filter-button UI can reuse the exact same glyphs.
+        /// </summary>
+        private static void DrawIcon(Graphics g, string category, float x, float rowY, float rowH, Color? textColor)
+        {
+            Color iconColor = textColor ?? Color.White;
+            float iy = rowY + (rowH - IconSize) / 2f;
+            DrawCategoryIcon(g, category, x, iy, IconSize, iconColor);
+        }
+ 
+        /// <summary>
+        /// Small hand-drawn vector glyphs for each LVL1-LVL12 category (no
+        /// emoji-font dependency, so these render identically everywhere):
+        /// FLOW=branch, VARIABLES=box, FUNCTIONS=lightning, OBJECTS=diamond,
+        /// DATA=stacked bars, TEXT=speech bubble, MATH=sigma, FILES=folder,
+        /// UI=window, TIME=clock, SYSTEM=gear, ADVANCED=overlapping circles.
+        /// </summary>
+        private static void DrawCategoryIcon(Graphics g, string category, float x, float y, float size, Color color)
+        {
+            using var pen = new Pen(color, 1.3f);
+            using var brush = new SolidBrush(color);
+ 
+            switch (category)
+            {
+                case "flow":
+                    g.DrawLine(pen, x + size * 0.5f, y, x + size * 0.5f, y + size * 0.42f);
+                    g.DrawLine(pen, x + size * 0.5f, y + size * 0.42f, x + size * 0.12f, y + size);
+                    g.DrawLine(pen, x + size * 0.5f, y + size * 0.42f, x + size * 0.88f, y + size);
+                    break;
+ 
+                case "variables":
+                    g.DrawRectangle(pen, x + size * 0.12f, y + size * 0.12f, size * 0.76f, size * 0.76f);
+                    break;
+ 
+                case "functions":
+                    g.FillPolygon(brush, new[]
+                    {
+                        new PointF(x + size * 0.58f, y),
+                        new PointF(x + size * 0.12f, y + size * 0.6f),
+                        new PointF(x + size * 0.46f, y + size * 0.6f),
+                        new PointF(x + size * 0.38f, y + size),
+                        new PointF(x + size * 0.88f, y + size * 0.38f),
+                        new PointF(x + size * 0.5f, y + size * 0.38f),
+                    });
+                    break;
+ 
+                case "objects":
+                    g.DrawPolygon(pen, new[]
+                    {
+                        new PointF(x + size * 0.5f, y),
+                        new PointF(x + size, y + size * 0.5f),
+                        new PointF(x + size * 0.5f, y + size),
+                        new PointF(x, y + size * 0.5f),
+                    });
+                    break;
+ 
+                case "data":
+                    for (int k = 0; k < 3; k++)
+                    {
+                        float by = y + k * (size * 0.4f);
+                        g.DrawLine(pen, x, by + size * 0.1f, x + size, by + size * 0.1f);
+                    }
+                    break;
+ 
+                case "text":
+                    g.DrawEllipse(pen, x, y, size, size * 0.72f);
+                    g.FillPolygon(brush, new[]
+                    {
+                        new PointF(x + size * 0.22f, y + size * 0.6f),
+                        new PointF(x + size * 0.08f, y + size),
+                        new PointF(x + size * 0.42f, y + size * 0.66f),
+                    });
+                    break;
+ 
+                case "math":
+                    using (var f = new Font(FontFamily.GenericSansSerif, size * 0.85f, FontStyle.Bold))
+                        g.DrawString("\u03A3", f, brush, x - size * 0.08f, y - size * 0.18f);
+                    break;
+ 
+                case "files":
+                    g.DrawLine(pen, x, y + size * 0.28f, x + size * 0.4f, y + size * 0.28f);
+                    g.DrawLine(pen, x + size * 0.4f, y + size * 0.28f, x + size * 0.5f, y + size * 0.14f);
+                    g.DrawRectangle(pen, x, y + size * 0.28f, size, size * 0.6f);
+                    break;
+ 
+                case "ui":
+                    g.DrawRectangle(pen, x, y, size, size * 0.8f);
+                    g.DrawLine(pen, x, y + size * 0.24f, x + size, y + size * 0.24f);
+                    break;
+ 
+                case "time":
+                    g.DrawEllipse(pen, x, y, size, size);
+                    g.DrawLine(pen, x + size * 0.5f, y + size * 0.5f, x + size * 0.5f, y + size * 0.2f);
+                    g.DrawLine(pen, x + size * 0.5f, y + size * 0.5f, x + size * 0.76f, y + size * 0.58f);
+                    break;
+ 
+                case "system":
+                    g.DrawPolygon(pen, HexPoints(x + size * 0.5f, y + size * 0.5f, size * 0.5f));
+                    g.DrawEllipse(pen, x + size * 0.3f, y + size * 0.3f, size * 0.4f, size * 0.4f);
+                    break;
+ 
+                case "advanced":
+                    g.DrawEllipse(pen, x, y + size * 0.14f, size * 0.58f, size * 0.72f);
+                    g.DrawEllipse(pen, x + size * 0.42f, y + size * 0.14f, size * 0.58f, size * 0.72f);
+                    break;
+ 
+                default:
+                    break; // "comment" / "grey": no icon, just keeps everything left-aligned
+            }
+        }
+ 
+        private static PointF[] HexPoints(float cx, float cy, float r)
+        {
+            var pts = new PointF[6];
+            for (int k = 0; k < 6; k++)
+            {
+                double ang = Math.PI / 3 * k - Math.PI / 6;
+                pts[k] = new PointF(cx + r * (float)Math.Cos(ang), cy + r * (float)Math.Sin(ang));
+            }
+            return pts;
+        }
+ 
+        /// <summary>
+        /// Draws a simple (non-C) block face: fills + bevels the shape.
+        /// (x, y, w, h) is always the BODY rect - for a hat block that means the
+        /// rectangular part below the arch; the arch is drawn using the HatBulge
+        /// constant above (x, y), so callers should pass y already shifted down
+        /// by HatBulge for hat blocks (see the Hat case in DrawBlock).
+        /// </summary>
+        private static void DrawSimpleFace(Graphics g, float x, float y, float w, float h, Color fill,
+            bool topNotch, bool bottomTab, bool hatTop)
+        {
+            float rTop = hatTop ? 0f : Radius;
+            using var path = BuildBarPath(x, y, w, h, topNotch, bottomTab, hatTop, rTop, Radius);
+            FillWithGradientAndBorder(g, path, fill);
+        }
+ 
+        /// <summary>
+        /// Traces one block "bar" as a single path: rounded (or square, if
+        /// rTop/rBottom is 0) corners, an optional notch cut into the top
+        /// edge, an optional tab protruding from the bottom edge, or - for a
+        /// class/def "starter" bar - an arch across the top instead of a
+        /// notch. (x, y) is always the very top-left of the bar's own
+        /// bounding box; when archTop is true the flat body sits HatBulge
+        /// below y (the arch peaks at y itself), exactly like the standalone
+        /// Hat shape used to.
+        /// </summary>
+        private static GraphicsPath BuildBarPath(float x, float y, float w, float h, bool topNotch, bool bottomTab, bool archTop, float rTop, float rBottom)
+        {
+            var p = new GraphicsPath();
+            bool fits = w > NotchX + NotchW + 4;
+            float dTop = rTop * 2f;
+            float dBottom = rBottom * 2f;
+            float topY = archTop ? y + HatBulge : y;
+            float bottomY = topY + h;
+ 
+            p.StartFigure();
+ 
+            if (archTop)
+            {
+                p.AddArc(new RectangleF(x, y, w, HatBulge * 2f), 180, 180); // peaks at y, lands at topY on both ends
+            }
+            else
+            {
+                if (rTop > 0.01f) p.AddArc(x, topY, dTop, dTop, 180, 90);
+                float topLeftX = rTop > 0.01f ? x + rTop : x;
+                float topRightX = rTop > 0.01f ? x + w - rTop : x + w;
+ 
+                if (topNotch && fits)
+                {
+                    p.AddLine(topLeftX, topY, x + NotchX, topY);
+                    p.AddLine(x + NotchX, topY, x + NotchX + NotchSlant, topY + NotchH);
+                    p.AddLine(x + NotchX + NotchSlant, topY + NotchH, x + NotchX + NotchW - NotchSlant, topY + NotchH);
+                    p.AddLine(x + NotchX + NotchW - NotchSlant, topY + NotchH, x + NotchX + NotchW, topY);
+                }
+                else if (rTop <= 0.01f)
+                {
+                    p.AddLine(topLeftX, topY, topRightX, topY);
+                }
+                // else: rTop>0 and no notch - the two corner arcs auto-connect the flat edge between them
+ 
+                if (rTop > 0.01f) p.AddArc(x + w - dTop, topY, dTop, dTop, 270, 90);
+            }
+ 
+            if (rBottom > 0.01f) p.AddArc(x + w - dBottom, bottomY - dBottom, dBottom, dBottom, 0, 90);
+ 
+            float botRightX = rBottom > 0.01f ? x + w - rBottom : x + w;
+            float botLeftX = rBottom > 0.01f ? x + rBottom : x;
+ 
+            if (bottomTab && fits)
+            {
+                p.AddLine(botRightX, bottomY, x + NotchX + NotchW, bottomY);
+                p.AddLine(x + NotchX + NotchW, bottomY, x + NotchX + NotchW - NotchSlant, bottomY + NotchH);
+                p.AddLine(x + NotchX + NotchW - NotchSlant, bottomY + NotchH, x + NotchX + NotchSlant, bottomY + NotchH);
+                p.AddLine(x + NotchX + NotchSlant, bottomY + NotchH, x + NotchX, bottomY);
+            }
+            else if (rBottom <= 0.01f)
+            {
+                p.AddLine(botRightX, bottomY, botLeftX, bottomY);
+            }
+ 
+            if (rBottom > 0.01f) p.AddArc(x, bottomY - dBottom, dBottom, dBottom, 90, 90);
+ 
+            p.CloseFigure(); // implicit straight left edge, full height, back to the start
+            return p;
+        }
+ 
+        /// <summary>
+        /// Fills a shape with a gentle diagonal gradient (lighter top-left,
+        /// darker bottom-right - reads as a raised, glossy surface) and
+        /// strokes ONE uniform border around its exact silhouette. This
+        /// intentionally does NOT try to do a separate two-tone light/dark
+        /// rim on top of that: every earlier attempt at that (clipped bands
+        /// on a plain rect, clipped bands on the full C outline, then
+        /// independent per-bar rim lines) ran into some version of "the
+        /// border looks different depending on which edge/corner you look
+        /// at" because it always involved either two regions that could
+        /// overlap, or a fixed set of explicit lines that don't line up with
+        /// the real notch/tab/arch geometry. A single fill + a single stroke
+        /// of the SAME path cannot have that problem by construction: there
+        /// is exactly one border, drawn once, at one width, everywhere.
+        /// </summary>
+        private static void FillWithGradientAndBorder(Graphics g, GraphicsPath path, Color fill)
+        {
+            var bounds = path.GetBounds();
+            bounds.Inflate(1f, 1f);
+            if (bounds.Width < 1f) bounds.Width = 1f;
+            if (bounds.Height < 1f) bounds.Height = 1f;
+ 
+            Color lightFill = Lighten(fill, 0.18f);
+            Color darkFill = Darken(fill, 0.22f);
+            using (var gradientBrush = new LinearGradientBrush(bounds, lightFill, darkFill, LinearGradientMode.ForwardDiagonal))
+                g.FillPath(gradientBrush, path);
+ 
+            using (var borderPen = new Pen(Darken(fill, 0.42f), 1f))
+                g.DrawPath(borderPen, path);
+        }
+ 
+        // ---- inline content (label text, reporters, booleans, dropdowns) ----
+ 
+        private static float DrawInlineRow(List<Node> nodes, Graphics g, float x, float y, float rowH, bool draw, Color? textColor = null)
+        {
+            float cursor = x;
+            bool first = true;
+            foreach (var n in nodes)
+            {
+                if (!first) cursor += PartGap;
+                first = false;
+                cursor += DrawNode(n, g, cursor, y, rowH, draw, textColor);
+            }
+            return cursor - x;
+        }
+ 
+        private static float DrawNode(Node n, Graphics g, float x, float y, float rowH, bool draw, Color? textColor = null)
+        {
+            if (n is TextNode t)
+            {
+                string trimmed = t.Text.Trim();
+                float w = MeasureNode(n, g);
+                if (draw && trimmed.Length > 0)
+                {
+                    var size = g.MeasureString(trimmed, BlockFont);
+                    float ty = y + (rowH - size.Height) / 2f;
+                    using var textBrush = new SolidBrush(textColor ?? Color.White);
+                    g.DrawString(trimmed, BlockFont, textBrush, x, ty);
+                }
+                return w;
+            }
+ 
+            if (n is PillNode pn)
+            {
+                var size = g.MeasureString(pn.Text, InlineFont);
+                float pillW = size.Width + PillPadH * 2f;
+                float pillH = InlineRowH;
+                float py0 = y + (rowH - pillH) / 2f;
+ 
+                if (draw)
+                {
+                    if (pn.Kind == PillKind.Variable)
+                    {
+                        var vc = PyClassifier.CategoryColors["variables"];
+                        using var path = BuildBarPath(x, py0, pillW, pillH, topNotch: false, bottomTab: false, archTop: false, rTop: pillH / 2f, rBottom: pillH / 2f);
+                        FillWithGradientAndBorder(g, path, vc);
+                        using var tb = new SolidBrush(Color.White);
+                        g.DrawString(pn.Text, InlineFont, tb, x + PillPadH, py0 + (pillH - size.Height) / 2f);
+                    }
+                    else
+                    {
+                        using var path = RoundedRectPath(x, py0, pillW, pillH, pillH / 2f);
+                        using var lb = new SolidBrush(Color.White);
+                        using var lp = new Pen(Color.FromArgb(140, 140, 140), 1f);
+                        g.FillPath(lb, path);
+                        g.DrawPath(lp, path);
+                        using var tb = new SolidBrush(Color.Black);
+                        g.DrawString(pn.Text, InlineFont, tb, x + PillPadH, py0 + (pillH - size.Height) / 2f);
+                    }
+                }
+                return pillW;
+            }
+ 
+            var bn = (BracketNode)n;
+            float innerH = InlineRowH;
+            float innerW = MeasureInlineRow(bn.Children, g);
+            float y0 = y + (rowH - innerH) / 2f;
+ 
+            if (bn.Open == '[')
+            {
+                float pillW = innerW + 22f;
+                if (draw)
+                {
+                    using var path = RoundedRectPath(x, y0, pillW, innerH, innerH / 2f);
+                    using var pillBrush = new SolidBrush(Color.White);
+                    using var pillPen = new Pen(Color.FromArgb(120, 120, 120), 1f);
+                    g.FillPath(pillBrush, path);
+                    g.DrawPath(pillPen, path);
+                    DrawInlineRow(bn.Children, g, x + 8f, y0, innerH, true);
+                    DrawDropdownArrow(g, x + pillW - 14f, y0 + innerH / 2f);
+                    RestoreTextColorForDropdown(g, bn, x + 8f, y0, innerH);
+                }
+                return pillW;
+            }
+ 
+            if (bn.Open == '<')
+            {
+                float hexW = Math.Max(30f, innerW + 22f);
+                string keyword = ScriptParser.HeaderKeywordText(bn.Children);
+                string? cat = PyClassifier.ClassifyInline(keyword);
+                if (draw)
+                {
+                    using var path = HexagonPath(x, y0, hexW, innerH);
+                    if (cat != null)
+                    {
+                        var hc = PyClassifier.CategoryColors[cat];
+                        using var hb = new SolidBrush(hc);
+                        using var hp = new Pen(Darken(hc, 0.25f), 1f);
+                        g.FillPath(hb, path);
+                        g.DrawPath(hp, path);
+                        DrawInlineRowColored(bn.Children, g, x + 10f, y0, innerH, Color.White);
+                    }
+                    else
+                    {
+                        using var hb = new SolidBrush(Color.White);
+                        using var hp = new Pen(Color.FromArgb(120, 120, 120), 1f);
+                        g.FillPath(hb, path);
+                        g.DrawPath(hp, path);
+                        DrawInlineRowColored(bn.Children, g, x + 10f, y0, innerH, Color.Black);
+                    }
+                }
+                return hexW;
+            }
+ 
+            // '(' round reporter / number slot
+            float ovalW = Math.Max(22f, innerW + 16f);
+            {
+                string keyword = ScriptParser.HeaderKeywordText(bn.Children);
+                string? cat = PyClassifier.ClassifyInline(keyword);
+                if (draw)
+                {
+                    using var path = RoundedRectPath(x, y0, ovalW, innerH, innerH / 2f);
+                    if (cat != null)
+                    {
+                        var hc = PyClassifier.CategoryColors[cat];
+                        using var hb = new SolidBrush(hc);
+                        using var hp = new Pen(Darken(hc, 0.25f), 1f);
+                        g.FillPath(hb, path);
+                        g.DrawPath(hp, path);
+                        DrawInlineRowColored(bn.Children, g, x + 8f, y0, innerH, Color.White);
+                    }
+                    else
+                    {
+                        using var hb = new SolidBrush(Color.White);
+                        using var hp = new Pen(Color.FromArgb(150, 150, 150), 1f);
+                        g.FillPath(hb, path);
+                        g.DrawPath(hp, path);
+                        DrawInlineRowColored(bn.Children, g, x + 8f, y0, innerH, Color.Black);
+                    }
+                }
+                return ovalW;
+            }
+        }
+ 
+        private static void RestoreTextColorForDropdown(Graphics g, BracketNode bn, float x, float y0, float innerH)
+        {
+            // Dropdown pill text is drawn black (drawn again here on top in
+            // black since DrawInlineRow above used the default white color
+            // for TextNode children - dropdown captions must read on white).
+            using var blackBrush = new SolidBrush(Color.Black);
+            float cx = x;
+            bool first = true;
+            foreach (var c in bn.Children)
+            {
+                if (!first) cx += PartGap;
+                first = false;
+                if (c is TextNode t)
+                {
+                    string trimmed = t.Text.Trim();
+                    if (trimmed.Length > 0)
+                    {
+                        var size = g.MeasureString(trimmed, InlineFont);
+                        float ty = y0 + (innerH - size.Height) / 2f;
+                        // paint over the white text drawn by DrawInlineRow
+                        using var whiteOver = new SolidBrush(Color.White);
+                        g.DrawString(trimmed, InlineFont, whiteOver, cx, ty);
+                        g.DrawString(trimmed, InlineFont, blackBrush, cx, ty);
+                    }
+                    cx += MeasureNode(c, g);
+                }
+                else
+                {
+                    cx += MeasureNode(c, g);
+                }
+            }
+        }
+ 
+        private static void DrawInlineRowColored(List<Node> nodes, Graphics g, float x, float y, float rowH, Color textColor)
+        {
+            float cursor = x;
+            bool first = true;
+            foreach (var n in nodes)
+            {
+                if (!first) cursor += PartGap;
+                first = false;
+                if (n is TextNode t)
+                {
+                    string trimmed = t.Text.Trim();
+                    if (trimmed.Length > 0)
+                    {
+                        var size = g.MeasureString(trimmed, InlineFont);
+                        float ty = y + (rowH - size.Height) / 2f;
+                        using var b = new SolidBrush(textColor);
+                        g.DrawString(trimmed, InlineFont, b, cursor, ty);
+                    }
+                    cursor += MeasureNode(n, g);
+                }
+                else
+                {
+                    cursor += DrawNode(n, g, cursor, y, rowH, true);
+                }
+            }
+        }
+ 
+        private static void DrawDropdownArrow(Graphics g, float cx, float cy)
+        {
+            using var b = new SolidBrush(Color.FromArgb(90, 90, 90));
+            var pts = new[]
+            {
+                new PointF(cx - 4f, cy - 2f),
+                new PointF(cx + 4f, cy - 2f),
+                new PointF(cx, cy + 3f),
+            };
+            g.FillPolygon(b, pts);
+        }
+ 
+        // ---- small standalone shape helpers still used by pills/dropdowns/hexagons ----
+ 
+        private static GraphicsPath RoundedRectPath(float x, float y, float w, float h, float r)
+        {
+            r = Math.Min(r, Math.Min(w, h) / 2f);
+            var p = new GraphicsPath();
+            if (r <= 0.01f)
+            {
+                p.AddRectangle(new RectangleF(x, y, w, h));
+                return p;
+            }
+            float d = r * 2f;
+            p.AddArc(x, y, d, d, 180, 90);
+            p.AddArc(x + w - d, y, d, d, 270, 90);
+            p.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+            p.AddArc(x, y + h - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+ 
+        private static GraphicsPath HexagonPath(float x, float y, float w, float h)
+        {
+            float cut = Math.Min(h / 2f * 0.75f, w / 2f - 2f);
+            var p = new GraphicsPath();
+            p.AddPolygon(new[]
+            {
+                new PointF(x + cut, y),
+                new PointF(x + w - cut, y),
+                new PointF(x + w, y + h / 2f),
+                new PointF(x + w - cut, y + h),
+                new PointF(x + cut, y + h),
+                new PointF(x, y + h / 2f),
+            });
+            return p;
+        }
+ 
+        private static Color Darken(Color c, float amount)
+        {
+            int r = (int)(c.R * (1f - amount));
+            int gg = (int)(c.G * (1f - amount));
+            int b = (int)(c.B * (1f - amount));
+            return Color.FromArgb(c.A, Math.Max(0, r), Math.Max(0, gg), Math.Max(0, b));
+        }
+ 
+        private static Color Lighten(Color c, float amount)
+        {
+            int r = c.R + (int)((255 - c.R) * amount);
+            int gg = c.G + (int)((255 - c.G) * amount);
+            int b = c.B + (int)((255 - c.B) * amount);
+            return Color.FromArgb(c.A, Math.Min(255, r), Math.Min(255, gg), Math.Min(255, b));
         }
     }
-
-    private void UpdatePythonCode()
+ 
+    // =========================================================================
+    // Canvas control: paints the parsed script with GDI+, supports scrolling
+    // =========================================================================
+    internal sealed class BlockCanvas : Panel
     {
-        pythonCodeBox.Text = workspacePanel.GeneratePython();
-        statusLabel.Text = $"  Python code updated – {workspacePanel.Blocks.Count} blocks placed.";
+        public List<BlockNode> Script = new();
+        private const float MarginX = 20f, MarginY = 20f;
+ 
+        public BlockCanvas()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            AutoScroll = true;
+            BackColor = Color.White;
+        }
+ 
+        public void SetScript(List<BlockNode> script)
+        {
+            Script = script;
+            using (var bmp = new Bitmap(1, 1))
+            using (var g = Graphics.FromImage(bmp))
+            {
+                Renderer.MeasureStack(Script, g, out float w, out float h);
+                AutoScrollMinSize = new Size((int)Math.Ceiling(w + MarginX * 2), (int)Math.Ceiling(h + MarginY * 2));
+            }
+            Invalidate();
+        }
+ 
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            g.TranslateTransform(AutoScrollPosition.X + MarginX, AutoScrollPosition.Y + MarginY);
+            Renderer.DrawStack(Script, g, 0, 0);
+        }
+ 
+        /// <summary>Renders the whole script to a right-sized bitmap for PNG export.</summary>
+        public Bitmap RenderToBitmap()
+        {
+            using var measureBmp = new Bitmap(1, 1);
+            using var measureG = Graphics.FromImage(measureBmp);
+            Renderer.MeasureStack(Script, measureG, out float w, out float h);
+ 
+            int width = (int)Math.Ceiling(w + MarginX * 2);
+            int height = (int)Math.Ceiling(h + MarginY * 2);
+            width = Math.Max(width, 1);
+            height = Math.Max(height, 1);
+ 
+            var bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.White);
+                g.TranslateTransform(MarginX, MarginY);
+                Renderer.DrawStack(Script, g, 0, 0);
+            }
+            return bmp;
+        }
+    }
+ 
+    // =========================================================================
+    // Main window
+    // =========================================================================
+    internal sealed class MainForm : Form
+    {
+        private readonly TextBox _input;
+        private readonly BlockCanvas _canvas;
+        private readonly System.Windows.Forms.Timer _debounce;
+        private readonly Label _status;
+ 
+        private const string SampleScript =
+@"#!/usr/bin/env python3
+# Demo script for the Python block visualizer
+import math
+import os
+ 
+class ShapeCalculator:
+    # Computes area and perimeter for simple shapes.
+ 
+    def __init__(self, name):
+        self.name = name
+        self.history = []
+ 
+    def area_of_circle(self, radius):
+        area = math.pi * radius ** 2
+        self.history.append(area)
+        return round(area, 2)
+ 
+def load_scores(path):
+    if not os.path.exists(path):
+        return []
+    scores = []
+    with open(path) as f:
+        for line in f.readlines():
+            line = line.strip()
+            if line.isdigit():
+                scores.append(int(line))
+            elif line == """":
+                continue
+            else:
+                print(f""Skipping bad line: {line}"")
+    return scores
+ 
+def summarize(scores):
+    total = sum(scores)
+    average = total / len(scores) if scores else 0
+    try:
+        highest = max(scores)
+    except ValueError:
+        highest = None
+    finally:
+        print(""Done summarizing"")
+    return total, average, highest
+ 
+for i in range(5):
+    print(i)
+ 
+scores = load_scores(""scores.txt"")
+total, average, highest = summarize(scores)
+print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
+ 
+        public MainForm()
+        {
+            Text = "Python Block Viewer (native WinForms / GDI+, no web engine)";
+            Width = 1180;
+            Height = 760;
+            StartPosition = FormStartPosition.CenterScreen;
+            Font = new Font(FontFamily.GenericSansSerif, 9f);
+ 
+            var split = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                SplitterDistance = 420,
+                FixedPanel = FixedPanel.Panel1,
+            };
+            Controls.Add(split);
+ 
+            var leftPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8) };
+            split.Panel1.Controls.Add(leftPanel);
+ 
+            var label = new Label { Text = "Python source (real code, indentation-based):", Dock = DockStyle.Top, Height = 22 };
+            leftPanel.Controls.Add(label);
+ 
+            _input = new TextBox
+            {
+                Multiline = true,
+                Dock = DockStyle.Fill,
+                Font = new Font(FontFamily.GenericMonospace, 10f),
+                ScrollBars = ScrollBars.Both,
+                AcceptsTab = true,
+                Text = SampleScript,
+            };
+            leftPanel.Controls.Add(_input);
+            _input.BringToFront();
+            label.SendToBack();
+ 
+            var buttonBar = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40, FlowDirection = FlowDirection.LeftToRight };
+            var renderBtn = new Button { Text = "Render", Width = 90 };
+            var exportBtn = new Button { Text = "Export PNG...", Width = 110 };
+            var sampleBtn = new Button { Text = "Reset Sample", Width = 110 };
+            buttonBar.Controls.Add(renderBtn);
+            buttonBar.Controls.Add(exportBtn);
+            buttonBar.Controls.Add(sampleBtn);
+            leftPanel.Controls.Add(buttonBar);
+            buttonBar.BringToFront();
+ 
+            _status = new Label { Dock = DockStyle.Bottom, Height = 20, Text = "", ForeColor = Color.DimGray };
+            leftPanel.Controls.Add(_status);
+            _status.BringToFront();
+ 
+            var rightPanel = new Panel { Dock = DockStyle.Fill };
+            split.Panel2.Controls.Add(rightPanel);
+            _canvas = new BlockCanvas { Dock = DockStyle.Fill };
+            rightPanel.Controls.Add(_canvas);
+ 
+            _debounce = new System.Windows.Forms.Timer { Interval = 250 };
+            _debounce.Tick += (s, e) => { _debounce.Stop(); DoRender(); };
+ 
+            _input.TextChanged += (s, e) => { _debounce.Stop(); _debounce.Start(); };
+            renderBtn.Click += (s, e) => DoRender();
+            exportBtn.Click += (s, e) => DoExport();
+            sampleBtn.Click += (s, e) => { _input.Text = SampleScript; DoRender(); };
+ 
+            Load += (s, e) => DoRender();
+        }
+ 
+        private void DoRender()
+        {
+            try
+            {
+                var script = ScriptParser.Parse(_input.Text);
+                _canvas.SetScript(script);
+                _status.Text = $"{script.Count} top-level block(s) parsed.";
+            }
+            catch (Exception ex)
+            {
+                _status.Text = "Parse error: " + ex.Message;
+            }
+        }
+ 
+        private void DoExport()
+        {
+            using var dlg = new SaveFileDialog
+            {
+                Filter = "PNG image (*.png)|*.png",
+                FileName = "scratchblocks.png",
+            };
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+ 
+            using var bmp = _canvas.RenderToBitmap();
+            bmp.Save(dlg.FileName, ImageFormat.Png);
+            _status.Text = "Saved: " + dlg.FileName;
+        }
     }
 }
+ 

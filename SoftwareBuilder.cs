@@ -1,15 +1,45 @@
-// SoftwareBuilder – Visual Python Programming Environment
-// Single-file .NET 6.0 Windows Forms Application
-// Build: dotnet new console -n SoftwareBuilder -f net6.0-windows
-// Replace Program.cs with this file, then: dotnet run
-// Assets: base\icons\*.png, base\fonts\*.ttf, Icon1.ico next to the executable (optional)
-
+// PyBlocksViewer (formerly ScratchBlocksViewer)
+// -----------------------------------------------------------------------------
+// A single-file .NET 6 WinForms tool that renders real Python source code as
+// colored, puzzle-piece "blocks" - the same visual language Scratch/
+// scratchblocks uses - to make scripts easier to scan at a glance. Everything
+// is drawn natively with GDI+ (System.Drawing); there is no WebView, no HTML,
+// no embedded browser.
+//
+// WHAT CHANGED FROM THE SCRATCH VERSION:
+//   - The parser now reads real, indentation-based Python (if/elif/else,
+//     for/while, try/except/finally, def/class, ...) instead of
+//     scratchblocks' "end"-terminated plain-text DSL.
+//   - The category palette + icons come from the LVL1-LVL12 taxonomy you
+//     provided (FLOW/VARIABLES/FUNCTIONS/OBJECTS/DATA/TEXT/MATH/FILES/UI/
+//     TIME/SYSTEM/ADVANCED), each with its own color and a small hand-drawn
+//     vector icon (no emoji-font dependency, so it renders identically on
+//     any machine).
+//   - Each Python line is classified by keyword/pattern and drawn as one
+//     block; lines ending in ":" become C-blocks with a nested "mouth"
+//     for their indented body, and chain any elif/else/except/finally
+//     continuations onto the same block.
+//
+// HONESTY NOTE: this is a heuristic, line-by-line classifier - not a real
+// Python AST parser. It doesn't track multi-line statements (triple-quoted
+// strings, brackets spanning lines, backslash continuations), and keyword
+// matching is pattern-based (e.g. ".append(" -> DATA) so it can occasionally
+// mis-tag an unusual line. It's meant to make ordinary scripts easier to
+// skim, not to be a source of semantic truth about the code.
+//
+// Build (on Windows, with the .NET 6 SDK installed):
+//   dotnet run
+// -----------------------------------------------------------------------------
+ 
 using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Drawing.Text;
+using System.IO;
 using System.Linq;
+using System.Media;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
@@ -25,6 +55,8 @@ namespace PyBlocksViewer
         private static void Main()
         {
             ApplicationConfiguration_Initialize();
+            AppAssets.LoadFont();
+            if (AppAssets.CustomFamily != null) Renderer.ApplyCustomFont(AppAssets.CustomFamily);
             Application.Run(new MainForm());
         }
  
@@ -759,15 +791,22 @@ namespace PyBlocksViewer
         public const float Radius = 4f;
         public const float NotchX = 14f;
         public const float NotchW = 18f;
-        public const float NotchH = 4f;
+        public const float NotchH = 7f;
         public const float NotchSlant = 4f;
         public const float InlineRowH = 20f;
         public const float MinBlockW = 46f;
         public const float IconSize = 13f;
         public const float IconGap = 6f;
  
-        public static readonly Font BlockFont = new(FontFamily.GenericSansSerif, 9.75f, FontStyle.Bold);
-        public static readonly Font InlineFont = new(FontFamily.GenericSansSerif, 9.5f, FontStyle.Regular);
+        public static Font BlockFont = new(FontFamily.GenericSansSerif, 9.75f, FontStyle.Bold);
+        public static Font InlineFont = new(FontFamily.GenericSansSerif, 9.5f, FontStyle.Regular);
+ 
+        /// <summary>Called once at startup (after AppAssets.LoadFont) to switch block text over to the custom UI font, if one was found.</summary>
+        public static void ApplyCustomFont(FontFamily family)
+        {
+            BlockFont = new Font(family, 9.75f, FontStyle.Bold);
+            InlineFont = new Font(family, 9.5f, FontStyle.Regular);
+        }
  
         // =====================================================================
         // PASS 1: measure (bottom-up), caches sizes on each BlockNode
@@ -776,7 +815,7 @@ namespace PyBlocksViewer
         /// <summary>Extra vertical breathing room placed above a "starter" block (Hat, or a class/def C-block) so separate scripts don't look welded together - skipped for the very first block in a stack.</summary>
         public const float StarterGap = 18f;
  
-        private static bool IsStarter(BlockNode b) => b.Shape == BlockShape.Hat || (b.Shape == BlockShape.CBlock && b.HatTop);
+        internal static bool IsStarter(BlockNode b) => b.Shape == BlockShape.Hat || (b.Shape == BlockShape.CBlock && b.HatTop);
  
         public static void MeasureStack(List<BlockNode> stack, Graphics g, out float width, out float height)
         {
@@ -1095,7 +1134,7 @@ namespace PyBlocksViewer
         /// DATA=stacked bars, TEXT=speech bubble, MATH=sigma, FILES=folder,
         /// UI=window, TIME=clock, SYSTEM=gear, ADVANCED=overlapping circles.
         /// </summary>
-        private static void DrawCategoryIcon(Graphics g, string category, float x, float y, float size, Color color)
+        internal static void DrawCategoryIcon(Graphics g, string category, float x, float y, float size, Color color)
         {
             using var pen = new Pen(color, 1.3f);
             using var brush = new SolidBrush(color);
@@ -1533,7 +1572,7 @@ namespace PyBlocksViewer
  
         // ---- small standalone shape helpers still used by pills/dropdowns/hexagons ----
  
-        private static GraphicsPath RoundedRectPath(float x, float y, float w, float h, float r)
+        internal static GraphicsPath RoundedRectPath(float x, float y, float w, float h, float r)
         {
             r = Math.Min(r, Math.Min(w, h) / 2f);
             var p = new GraphicsPath();
@@ -1567,7 +1606,7 @@ namespace PyBlocksViewer
             return p;
         }
  
-        private static Color Darken(Color c, float amount)
+        internal static Color Darken(Color c, float amount)
         {
             int r = (int)(c.R * (1f - amount));
             int gg = (int)(c.G * (1f - amount));
@@ -1575,7 +1614,7 @@ namespace PyBlocksViewer
             return Color.FromArgb(c.A, Math.Max(0, r), Math.Max(0, gg), Math.Max(0, b));
         }
  
-        private static Color Lighten(Color c, float amount)
+        internal static Color Lighten(Color c, float amount)
         {
             int r = c.R + (int)((255 - c.R) * amount);
             int gg = c.G + (int)((255 - c.G) * amount);
@@ -1587,21 +1626,58 @@ namespace PyBlocksViewer
     // =========================================================================
     // Canvas control: paints the parsed script with GDI+, supports scrolling
     // =========================================================================
+    /// <summary>One place a dragged palette block can land.</summary>
+    internal readonly struct DropSlot
+    {
+        public readonly float Y, PreviewX, PreviewW;
+        public readonly int Line;       // raw source line this slot is anchored to
+        public readonly bool After;     // insert after Line (true) or before it (false)
+        public readonly int IndentSpaces;
+        public DropSlot(float y, float previewX, float previewW, int line, bool after, int indentSpaces)
+        {
+            Y = y; PreviewX = previewX; PreviewW = previewW; Line = line; After = after; IndentSpaces = indentSpaces;
+        }
+    }
+ 
+    /// <summary>
+    /// What's actually being dragged: text lines to insert (relative-indented,
+    /// first line at column 0), and - only when moving an EXISTING chain of
+    /// blocks already on the canvas - the raw source line range to remove
+    /// from its old spot. A fresh drag from the palette leaves both Remove*
+    /// fields null, so the drop handler just inserts without deleting
+    /// anything first.
+    /// </summary>
+    internal sealed class DragPayload
+    {
+        public List<string> Lines = new();
+        public int? RemoveFromLine;
+        public int? RemoveToLineInclusive;
+    }
+ 
     internal sealed class BlockCanvas : Panel
     {
         public List<BlockNode> Script = new();
+        private string[] _rawLines = Array.Empty<string>();
         private const float MarginX = 20f, MarginY = 20f;
+ 
+        /// <summary>Fired on a successful drop: the dragged payload, and where to insert it.</summary>
+        public event Action<DragPayload, DropSlot>? BlockDropped;
+ 
+        private DropSlot? _preview;
+        private DragPayload? _dragPreviewPayload;
  
         public BlockCanvas()
         {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
             AutoScroll = true;
             BackColor = Color.White;
+            AllowDrop = true;
         }
  
-        public void SetScript(List<BlockNode> script)
+        public void SetScript(List<BlockNode> script, string[] rawLines)
         {
             Script = script;
+            _rawLines = rawLines;
             using (var bmp = new Bitmap(1, 1))
             using (var g = Graphics.FromImage(bmp))
             {
@@ -1619,6 +1695,45 @@ namespace PyBlocksViewer
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
             g.TranslateTransform(AutoScrollPosition.X + MarginX, AutoScrollPosition.Y + MarginY);
             Renderer.DrawStack(Script, g, 0, 0);
+ 
+            if (_preview.HasValue)
+            {
+                var d = _preview.Value;
+ 
+                // Ghost: the ACTUAL dragged block(s), rendered translucently
+                // right where they'd land, so you can see how they'll connect
+                // before you let go - not just a bare insertion line.
+                if (_dragPreviewPayload != null)
+                {
+                    try
+                    {
+                        var ghostScript = ScriptParser.Parse(string.Join("\n", _dragPreviewPayload.Lines));
+                        Renderer.MeasureStack(ghostScript, g, out float gw, out float gh);
+                        int bw = Math.Max(1, (int)Math.Ceiling(gw) + 4);
+                        int bh = Math.Max(1, (int)Math.Ceiling(gh) + 4);
+                        using var ghostBmp = new Bitmap(bw, bh, PixelFormat.Format32bppArgb);
+                        using (var gg = Graphics.FromImage(ghostBmp))
+                        {
+                            gg.SmoothingMode = SmoothingMode.AntiAlias;
+                            Renderer.DrawStack(ghostScript, gg, 2, 2);
+                        }
+                        var matrix = new ColorMatrix { Matrix33 = 0.55f }; // 55% opacity
+                        using var attrs = new ImageAttributes();
+                        attrs.SetColorMatrix(matrix);
+                        var dest = new Rectangle((int)d.PreviewX, (int)(d.Y + 5f), bw, bh);
+                        g.DrawImage(ghostBmp, dest, 0, 0, bw, bh, GraphicsUnit.Pixel, attrs);
+                    }
+                    catch
+                    {
+                        // a malformed in-flight drag payload should never break painting
+                    }
+                }
+ 
+                using var pen = new Pen(Color.FromArgb(230, 40, 160, 40), 3f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+                g.DrawLine(pen, d.PreviewX, d.Y, d.PreviewX + d.PreviewW, d.Y);
+                using var dot = new SolidBrush(Color.FromArgb(230, 40, 160, 40));
+                g.FillEllipse(dot, d.PreviewX - 4f, d.Y - 4f, 8f, 8f);
+            }
         }
  
         /// <summary>Renders the whole script to a right-sized bitmap for PNG export.</summary>
@@ -1642,6 +1757,542 @@ namespace PyBlocksViewer
                 Renderer.DrawStack(Script, g, 0, 0);
             }
             return bmp;
+        }
+ 
+        // ---- drag & drop -----------------------------------------------------
+ 
+        private PointF ToContentPoint(int screenX, int screenY)
+        {
+            var p = PointToClient(new Point(screenX, screenY));
+            return new PointF(p.X - (AutoScrollPosition.X + MarginX), p.Y - (AutoScrollPosition.Y + MarginY));
+        }
+ 
+        protected override void OnDragEnter(DragEventArgs e)
+        {
+            base.OnDragEnter(e);
+            e.Effect = (e.Data?.GetDataPresent(typeof(DragPayload)) ?? false) ? DragDropEffects.Copy : DragDropEffects.None;
+        }
+ 
+        protected override void OnDragOver(DragEventArgs e)
+        {
+            base.OnDragOver(e);
+            if (e.Data == null || !e.Data.GetDataPresent(typeof(DragPayload))) { e.Effect = DragDropEffects.None; _preview = null; _dragPreviewPayload = null; Invalidate(); return; }
+            e.Effect = DragDropEffects.Copy;
+            var pt = ToContentPoint(e.X, e.Y);
+            _preview = ComputeDropSlot(pt.X, pt.Y);
+            _dragPreviewPayload = e.Data.GetData(typeof(DragPayload)) as DragPayload;
+            Invalidate();
+        }
+ 
+        protected override void OnDragLeave(EventArgs e)
+        {
+            base.OnDragLeave(e);
+            _preview = null;
+            _dragPreviewPayload = null;
+            Invalidate();
+        }
+ 
+        protected override void OnDragDrop(DragEventArgs e)
+        {
+            base.OnDragDrop(e);
+            _preview = null;
+            _dragPreviewPayload = null;
+            if (e.Data == null || !e.Data.GetDataPresent(typeof(DragPayload))) { Invalidate(); return; }
+            if (e.Data.GetData(typeof(DragPayload)) is not DragPayload payload) { Invalidate(); return; }
+ 
+            var pt = ToContentPoint(e.X, e.Y);
+            var slot = ComputeDropSlot(pt.X, pt.Y);
+            if (slot.HasValue) BlockDropped?.Invoke(payload, slot.Value);
+            Invalidate();
+        }
+ 
+        // ---- picking up an EXISTING block (and everything chained below it) ----
+ 
+        private Point _mouseDownScreenPt;
+        private bool _armedForChainDrag;
+        private (List<BlockNode> stack, int index)? _armedChain;
+ 
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) { _armedForChainDrag = false; return; }
+            float cx = e.X - (AutoScrollPosition.X + MarginX);
+            float cy = e.Y - (AutoScrollPosition.Y + MarginY);
+            _armedChain = HitTestChain(Script, 0f, 0, cx, cy);
+            _mouseDownScreenPt = Cursor.Position;
+            _armedForChainDrag = _armedChain.HasValue;
+        }
+ 
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (!_armedForChainDrag || e.Button != MouseButtons.Left || _armedChain == null) return;
+            var cur = Cursor.Position;
+            if (Math.Abs(cur.X - _mouseDownScreenPt.X) < 5 && Math.Abs(cur.Y - _mouseDownScreenPt.Y) < 5) return;
+            _armedForChainDrag = false;
+ 
+            var (stack, index) = _armedChain.Value;
+            var chain = stack.Skip(index).ToList();
+            if (chain.Count == 0 || _rawLines.Length == 0) return;
+ 
+            int rf = chain[0].SourceLine;
+            int rt = chain[^1].EndLine;
+            if (rf < 0 || rt < rf || rt >= _rawLines.Length) return;
+ 
+            int baseIndent = CountLeadingSpaces(_rawLines[rf]);
+            var relLines = new List<string>();
+            for (int ln = rf; ln <= rt; ln++)
+            {
+                string raw = _rawLines[ln].Replace("\t", "    ");
+                int lead = CountLeadingSpaces(raw);
+                int keep = Math.Max(0, lead - baseIndent);
+                relLines.Add(new string(' ', keep) + raw.TrimStart(' '));
+            }
+ 
+            var payload = new DragPayload { Lines = relLines, RemoveFromLine = rf, RemoveToLineInclusive = rt };
+            DoDragDrop(payload, DragDropEffects.Move);
+        }
+ 
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            _armedForChainDrag = false;
+            _armedChain = null;
+        }
+ 
+        private static int CountLeadingSpaces(string s)
+        {
+            int n = 0;
+            while (n < s.Length && s[n] == ' ') n++;
+            return n;
+        }
+ 
+        /// <summary>
+        /// Finds which block (and which stack it lives in) the cursor is
+        /// over, preferring the deepest nested match - so clicking a block
+        /// inside a class body picks up that inner block, not the class
+        /// itself. Returns the CONTAINING stack and the clicked block's index
+        /// in it, so the caller can grab that block plus everything chained
+        /// after it in the same stack (matching how picking up a block in
+        /// Scratch takes the rest of the stack below it along).
+        /// </summary>
+        private static (List<BlockNode> stack, int index)? HitTestChain(List<BlockNode> stack, float startY, int depth, float cx, float cy)
+        {
+            float curY = startY;
+            for (int i = 0; i < stack.Count; i++)
+            {
+                var b = stack[i];
+                if (i > 0 && Renderer.IsStarter(b)) curY += Renderer.StarterGap;
+                float top = curY, bottom = curY + b.H;
+ 
+                if (cy >= top && cy < bottom)
+                {
+                    if (b.Shape == BlockShape.CBlock)
+                    {
+                        float mouthY = curY + b.HeaderH;
+                        for (int m = 0; m < b.Mouths.Count; m++)
+                        {
+                            var childHit = HitTestChain(b.Mouths[m], mouthY, depth + 1, cx, cy);
+                            if (childHit.HasValue) return childHit;
+                            mouthY += b.MouthH[m];
+                            if (m < b.ContinuationHeaders.Count) mouthY += b.ContinuationHeaderH[m];
+                        }
+                    }
+                    return (stack, i);
+                }
+                curY += b.H;
+            }
+            return null;
+        }
+ 
+        /// <summary>
+        /// Finds the nearest place to insert a dropped block: walks the
+        /// already-measured tree (same traversal DrawStack uses, so the
+        /// preview lines up with what's actually on screen) collecting one
+        /// candidate per block boundary, then picks whichever is closest to
+        /// the cursor - preferring the deepest nesting level the cursor's X
+        /// position plausibly reaches into (a rough "am I indented enough to
+        /// be inside this body" check, not exact hit-testing of the mouth's
+        /// true silhouette).
+        /// </summary>
+        private DropSlot? ComputeDropSlot(float cx, float cy)
+        {
+            var candidates = new List<DropSlot>();
+            CollectDropSlots(Script, 0f, 0, candidates);
+            if (candidates.Count == 0) return null;
+ 
+            const float indentTolerance = 10f;
+            var reachable = candidates.Where(c => cx >= c.PreviewX - indentTolerance - Renderer.Indent).ToList();
+            var pool = reachable.Count > 0 ? reachable : candidates;
+ 
+            DropSlot best = pool[0];
+            float bestDist = Math.Abs(cy - best.Y);
+            foreach (var c in pool)
+            {
+                float dist = Math.Abs(cy - c.Y);
+                if (dist < bestDist) { bestDist = dist; best = c; }
+            }
+            return best;
+        }
+ 
+        private static void CollectDropSlots(List<BlockNode> stack, float startY, int depth, List<DropSlot> outList)
+        {
+            float previewX = depth * Renderer.Indent;
+            float curY = startY;
+ 
+            for (int i = 0; i < stack.Count; i++)
+            {
+                var b = stack[i];
+                if (i > 0 && Renderer.IsStarter(b)) curY += Renderer.StarterGap;
+ 
+                outList.Add(new DropSlot(curY, previewX, Math.Max(b.W, 60f), b.SourceLine, after: false, indentSpaces: depth * 4));
+ 
+                if (b.Shape == BlockShape.CBlock)
+                {
+                    float mouthY = curY + b.HeaderH;
+                    for (int m = 0; m < b.Mouths.Count; m++)
+                    {
+                        if (b.Mouths[m].Count == 0)
+                        {
+                            outList.Add(new DropSlot(mouthY + 6f, (depth + 1) * Renderer.Indent, 60f, b.SourceLine, after: true, indentSpaces: (depth + 1) * 4));
+                        }
+                        else
+                        {
+                            CollectDropSlots(b.Mouths[m], mouthY, depth + 1, outList);
+                            var lastChild = b.Mouths[m][^1];
+                            outList.Add(new DropSlot(mouthY + b.MouthH[m], (depth + 1) * Renderer.Indent, 60f, lastChild.EndLine, after: true, indentSpaces: (depth + 1) * 4));
+                        }
+                        mouthY += b.MouthH[m];
+                        if (m < b.ContinuationHeaders.Count) mouthY += b.ContinuationHeaderH[m];
+                    }
+                }
+ 
+                curY += b.H;
+            }
+ 
+            // trailing slot: append after everything in this stack
+            outList.Add(new DropSlot(curY, previewX, 60f,
+                stack.Count > 0 ? stack[^1].EndLine : -1, after: true, indentSpaces: depth * 4));
+        }
+    }
+ 
+    // =========================================================================
+    // Asset loading: an optional "base/" folder next to the .exe can supply a
+    // custom UI font (base/fonts/Lucida Grande.ttf), category icons
+    // (base/icons/<category>.png, e.g. flow.png, variables.png, ...), and UI
+    // sounds (base/sounds/<name>.wav). Everything here is written to degrade
+    // gracefully - none of these files exist yet, so every lookup falls back
+    // to what the app already does (GenericSansSerif, the hand-drawn vector
+    // icons, silence) until the folder is actually populated.
+    // =========================================================================
+    internal static class AppAssets
+    {
+        private static readonly string BaseDir = Path.Combine(AppContext.BaseDirectory, "base");
+        private static readonly PrivateFontCollection FontCollection = new();
+        private static readonly Dictionary<string, Image?> IconCache = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, SoundPlayer?> SoundCache = new(StringComparer.OrdinalIgnoreCase);
+ 
+        public static FontFamily? CustomFamily { get; private set; }
+ 
+        /// <summary>Call once at startup. Silently no-ops if base/fonts/Lucida Grande.ttf isn't there.</summary>
+        public static void LoadFont()
+        {
+            try
+            {
+                string path = Path.Combine(BaseDir, "fonts", "Arial.ttf");
+                if (File.Exists(path))
+                {
+                    FontCollection.AddFontFile(path);
+                    if (FontCollection.Families.Length > 0) CustomFamily = FontCollection.Families[0];
+                }
+            }
+            catch
+            {
+                CustomFamily = null; // a corrupt/locked font file should never crash startup
+            }
+        }
+ 
+        /// <summary>The app's UI font family - the custom one if base/fonts supplied it, otherwise the same generic sans-serif used before.</summary>
+        public static FontFamily UiFamily => CustomFamily ?? FontFamily.GenericSansSerif;
+ 
+        public static Font UiFont(float size, FontStyle style = FontStyle.Regular) => new(UiFamily, size, style);
+ 
+        /// <summary>Loads base/icons/&lt;category&gt;.png, caching the result (including the "not found" miss). Returns null if it isn't there, so callers fall back to the vector icon.</summary>
+        public static Image? Icon(string category)
+        {
+            if (IconCache.TryGetValue(category, out var cached)) return cached;
+            Image? img = null;
+            try
+            {
+                string path = Path.Combine(BaseDir, "icons", category + ".png");
+                if (File.Exists(path)) img = Image.FromFile(path);
+            }
+            catch
+            {
+                img = null; // a malformed PNG should never crash the palette
+            }
+            IconCache[category] = img;
+            return img;
+        }
+ 
+        /// <summary>Plays base/sounds/&lt;name&gt;.wav if present; silently does nothing otherwise (including if the file is missing, locked, or not actually a WAV).</summary>
+        public static void PlaySound(string name)
+        {
+            try
+            {
+                if (!SoundCache.TryGetValue(name, out var player))
+                {
+                    string path = Path.Combine(BaseDir, "sounds", name + ".wav");
+                    player = File.Exists(path) ? new SoundPlayer(path) : null;
+                    SoundCache[name] = player;
+                }
+                player?.Play();
+            }
+            catch
+            {
+                // never let a bad sound file interrupt an edit
+            }
+        }
+    }
+ 
+    // =========================================================================
+    // Palette UI: a left-side panel of draggable block "stencils", grouped
+    // into the same categories as the classifier, styled after the reference
+    // (Stencyl-style) block palette - category buttons up top, a search box,
+    // and a scrollable list of blocks below. Each stencil is a REAL rendered
+    // block preview (built by feeding its template through the same parser
+    // and renderer the canvas uses), not a separate mockup drawing, so the
+    // palette and the canvas always look identical.
+    // =========================================================================
+ 
+    /// <summary>One draggable block preview in the palette.</summary>
+    internal sealed class StencilTile : Panel
+    {
+        public readonly PaletteItem Item;
+        private Point _mouseDownPt;
+        private bool _armed;
+ 
+        public StencilTile(PaletteItem item)
+        {
+            Item = item;
+            Height = 48;
+            Margin = new Padding(6, 4, 6, 4);
+            Cursor = Cursors.Hand;
+            BackColor = Color.White;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+        }
+ 
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using var border = new Pen(Color.FromArgb(225, 225, 225), 1f);
+            g.DrawRectangle(border, 0, 0, Width - 1, Height - 1);
+ 
+            try
+            {
+                string src = Item.Template + (Item.RequiresBody ? "\n    pass" : "");
+                var script = ScriptParser.Parse(src);
+                Renderer.MeasureStack(script, g, out float w, out float h);
+                float availW = Width - 12f, availH = Height - 8f;
+                float scale = Math.Min(availW / Math.Max(w, 1f), availH / Math.Max(h, 1f));
+                scale = Math.Min(scale, 1f);
+ 
+                var state = g.Save();
+                g.TranslateTransform(6f, 4f);
+                if (scale < 1f) g.ScaleTransform(scale, scale);
+                Renderer.DrawStack(script, g, 0, 0);
+                g.Restore(state);
+            }
+            catch
+            {
+                // A malformed template should never take the palette down with it.
+                using var f = new SolidBrush(Color.Gray);
+                g.DrawString(Item.Label, SystemFonts.DefaultFont, f, 6, 6);
+            }
+        }
+ 
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            _mouseDownPt = e.Location;
+            _armed = e.Button == MouseButtons.Left;
+        }
+ 
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (!_armed || e.Button != MouseButtons.Left) return;
+            if (Math.Abs(e.X - _mouseDownPt.X) < 4 && Math.Abs(e.Y - _mouseDownPt.Y) < 4) return;
+            _armed = false;
+            var payload = new DragPayload { Lines = new List<string> { Item.Template } };
+            if (Item.RequiresBody) payload.Lines.Add("    pass");
+            DoDragDrop(payload, DragDropEffects.Copy);
+        }
+ 
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            _armed = false;
+        }
+    }
+ 
+    /// <summary>
+    /// A category button styled after the reference screenshot: a rounded
+    /// ("squircle") tile with a diagonal gradient fill in the category's
+    /// color, an icon (loaded from base/icons/&lt;category&gt;.png if present,
+    /// otherwise the same hand-drawn vector glyph used elsewhere), and a
+    /// label underneath. A thicker ring marks the currently-selected category.
+    /// </summary>
+    internal sealed class CategoryButton : Control
+    {
+        public readonly string CategoryKey;
+        private readonly string _display;
+        private readonly Color _color;
+        public bool Selected;
+ 
+        public CategoryButton(string key, string display, Color color)
+        {
+            CategoryKey = key;
+            _display = display;
+            _color = color;
+            Width = 92;
+            Height = 58;
+            Cursor = Cursors.Hand;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        }
+ 
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+ 
+            var rect = new RectangleF(1.5f, 1.5f, Width - 3f, Height - 3f);
+            using var path = Renderer.RoundedRectPath(rect.X, rect.Y, rect.Width, rect.Height, 12f);
+ 
+            Color light = Renderer.Lighten(_color, 0.22f);
+            Color dark = Renderer.Darken(_color, 0.20f);
+            using (var grad = new LinearGradientBrush(rect, light, dark, LinearGradientMode.ForwardDiagonal))
+                g.FillPath(grad, path);
+ 
+            using (var pen = new Pen(Renderer.Darken(_color, 0.42f), Selected ? 2.5f : 1f))
+                g.DrawPath(pen, path);
+ 
+            const float iconSize = 20f;
+            float iconX = (Width - iconSize) / 2f, iconY = 6f;
+            var img = AppAssets.Icon(CategoryKey);
+            if (img != null)
+                g.DrawImage(img, new RectangleF(iconX, iconY, iconSize, iconSize));
+            else
+                Renderer.DrawCategoryIcon(g, CategoryKey, iconX, iconY, iconSize, Color.White);
+ 
+            using var textBrush = new SolidBrush(Color.White);
+            using var font = AppAssets.UiFont(7.75f, FontStyle.Bold);
+            using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Near, Trimming = StringTrimming.EllipsisCharacter };
+            g.DrawString(_display, font, textBrush, new RectangleF(2, iconY + iconSize + 3, Width - 4, Height - iconY - iconSize - 5), sf);
+        }
+    }
+ 
+    internal sealed class PalettePanel : Panel
+    {
+        private readonly FlowLayoutPanel _stencilFlow;
+        private readonly TextBox _search;
+        private readonly Dictionary<string, CategoryButton> _categoryButtons = new();
+        private string _currentCategory = "flow";
+ 
+        public PalettePanel()
+        {
+            Dock = DockStyle.Fill;
+            BackColor = Color.FromArgb(248, 248, 248);
+ 
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            Controls.Add(root);
+ 
+            var title = new Label
+            {
+                Text = "Python Blocks",
+                Dock = DockStyle.Top,
+                Height = 28,
+                Font = AppAssets.UiFont(10.5f, FontStyle.Bold),
+                Padding = new Padding(8, 6, 0, 0),
+            };
+            root.Controls.Add(title, 0, 0);
+ 
+            var searchWrap = new Panel { Dock = DockStyle.Top, Height = 32, Padding = new Padding(8, 0, 8, 4) };
+            _search = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "Search blocks..." };
+            _search.TextChanged += (s, e) => RefreshList();
+            searchWrap.Controls.Add(_search);
+            root.Controls.Add(searchWrap, 0, 1);
+ 
+            var catFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = true,
+                Padding = new Padding(4),
+            };
+            foreach (var (key, display) in PaletteCatalog.Categories)
+            {
+                var color = PyClassifier.CategoryColors.TryGetValue(key, out var c) ? c : Color.Gray;
+                var btn = new CategoryButton(key, display, color) { Margin = new Padding(3) };
+                string keyCopy = key;
+                btn.Click += (s, e) => { _currentCategory = keyCopy; _search.Text = ""; UpdateCategoryHighlight(); RefreshList(); };
+                _categoryButtons[key] = btn;
+                catFlow.Controls.Add(btn);
+            }
+            root.Controls.Add(catFlow, 0, 2);
+ 
+            var scrollHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Color.White, Padding = new Padding(0) };
+            _stencilFlow = new FlowLayoutPanel
+            {
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Width = scrollHost.ClientSize.Width - 4,
+            };
+            scrollHost.Controls.Add(_stencilFlow);
+            scrollHost.Resize += (s, e) => _stencilFlow.Width = Math.Max(100, scrollHost.ClientSize.Width - 20);
+            root.Controls.Add(scrollHost, 0, 3);
+ 
+            UpdateCategoryHighlight();
+            RefreshList();
+        }
+ 
+        private void UpdateCategoryHighlight()
+        {
+            foreach (var (key, btn) in _categoryButtons)
+            {
+                btn.Selected = key == _currentCategory;
+                btn.Invalidate();
+            }
+        }
+ 
+        private void RefreshList()
+        {
+            _stencilFlow.SuspendLayout();
+            foreach (Control c in _stencilFlow.Controls) c.Dispose();
+            _stencilFlow.Controls.Clear();
+ 
+            string q = _search.Text.Trim();
+            IEnumerable<PaletteItem> items = q.Length > 0
+                ? PaletteCatalog.Items.Where(i =>
+                    i.Label.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+                    i.Template.Contains(q, StringComparison.OrdinalIgnoreCase))
+                : PaletteCatalog.ForCategory(_currentCategory);
+ 
+            foreach (var item in items)
+            {
+                var tile = new StencilTile(item) { Width = _stencilFlow.Width - 4 };
+                _stencilFlow.Controls.Add(tile);
+            }
+            _stencilFlow.ResumeLayout();
         }
     }
  
@@ -1708,57 +2359,76 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
  
         public MainForm()
         {
-            Text = "Python Block Viewer (native WinForms / GDI+, no web engine)";
-            Width = 1180;
-            Height = 760;
+            Text = "Python Block Editor (native WinForms / GDI+, no web engine)";
+            Width = 1360;
+            Height = 820;
             StartPosition = FormStartPosition.CenterScreen;
-            Font = new Font(FontFamily.GenericSansSerif, 9f);
+            Font = AppAssets.UiFont(9f);
  
-            var split = new SplitContainer
+            var outerSplit = new SplitContainer
             {
                 Dock = DockStyle.Fill,
-                SplitterDistance = 420,
+                SplitterDistance = 300,
                 FixedPanel = FixedPanel.Panel1,
             };
-            Controls.Add(split);
+            Controls.Add(outerSplit);
  
-            var leftPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(8) };
-            split.Panel1.Controls.Add(leftPanel);
+            var palette = new PalettePanel();
+            outerSplit.Panel1.Controls.Add(palette);
  
-            var label = new Label { Text = "Python source (real code, indentation-based):", Dock = DockStyle.Top, Height = 22 };
-            leftPanel.Controls.Add(label);
+            var rightSplit = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                Orientation = Orientation.Vertical, // splitter is vertical -> panels sit side by side (Canvas | Source)
+                SplitterDistance = 700,
+            };
+            outerSplit.Panel2.Controls.Add(rightSplit);
+ 
+            // ---- middle: canvas (drop target) + toolbar ----
+            var canvasHost = new Panel { Dock = DockStyle.Fill };
+            rightSplit.Panel1.Controls.Add(canvasHost);
+ 
+            var toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 40, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(4) };
+            canvasHost.Controls.Add(toolbar);
+ 
+            var renderBtn = new Button { Text = "Render", Width = 80 };
+            var exportBtn = new Button { Text = "Export PNG...", Width = 110 };
+            var sampleBtn = new Button { Text = "Reset Sample", Width = 110 };
+            var toggleSourceBtn = new Button { Text = "Hide Source", Width = 100 };
+            toolbar.Controls.Add(renderBtn);
+            toolbar.Controls.Add(exportBtn);
+            toolbar.Controls.Add(sampleBtn);
+            toolbar.Controls.Add(toggleSourceBtn);
+ 
+            _canvas = new BlockCanvas { Dock = DockStyle.Fill };
+            canvasHost.Controls.Add(_canvas);
+            _canvas.BringToFront();
+            toolbar.SendToBack();
+ 
+            // ---- right: Python Code panel - directly editable, and where
+            // dropped-block text edits land - collapsible via the toolbar button ----
+            var sourceHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(4) };
+            rightSplit.Panel2.Controls.Add(sourceHost);
+ 
+            var sourceLabel = new Label { Text = "Python Code (edit directly, or drag blocks from the left onto the canvas):", Dock = DockStyle.Top, Height = 20 };
+            sourceHost.Controls.Add(sourceLabel);
  
             _input = new TextBox
             {
                 Multiline = true,
                 Dock = DockStyle.Fill,
-                Font = new Font(FontFamily.GenericMonospace, 10f),
+                Font = new Font(FontFamily.GenericMonospace, 9.5f),
                 ScrollBars = ScrollBars.Both,
                 AcceptsTab = true,
                 Text = SampleScript,
             };
-            leftPanel.Controls.Add(_input);
+            sourceHost.Controls.Add(_input);
             _input.BringToFront();
-            label.SendToBack();
- 
-            var buttonBar = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40, FlowDirection = FlowDirection.LeftToRight };
-            var renderBtn = new Button { Text = "Render", Width = 90 };
-            var exportBtn = new Button { Text = "Export PNG...", Width = 110 };
-            var sampleBtn = new Button { Text = "Reset Sample", Width = 110 };
-            buttonBar.Controls.Add(renderBtn);
-            buttonBar.Controls.Add(exportBtn);
-            buttonBar.Controls.Add(sampleBtn);
-            leftPanel.Controls.Add(buttonBar);
-            buttonBar.BringToFront();
+            sourceLabel.SendToBack();
  
             _status = new Label { Dock = DockStyle.Bottom, Height = 20, Text = "", ForeColor = Color.DimGray };
-            leftPanel.Controls.Add(_status);
+            sourceHost.Controls.Add(_status);
             _status.BringToFront();
- 
-            var rightPanel = new Panel { Dock = DockStyle.Fill };
-            split.Panel2.Controls.Add(rightPanel);
-            _canvas = new BlockCanvas { Dock = DockStyle.Fill };
-            rightPanel.Controls.Add(_canvas);
  
             _debounce = new System.Windows.Forms.Timer { Interval = 250 };
             _debounce.Tick += (s, e) => { _debounce.Stop(); DoRender(); };
@@ -1767,16 +2437,62 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             renderBtn.Click += (s, e) => DoRender();
             exportBtn.Click += (s, e) => DoExport();
             sampleBtn.Click += (s, e) => { _input.Text = SampleScript; DoRender(); };
+            toggleSourceBtn.Click += (s, e) =>
+            {
+                rightSplit.Panel2Collapsed = !rightSplit.Panel2Collapsed;
+                toggleSourceBtn.Text = rightSplit.Panel2Collapsed ? "Show Source" : "Hide Source";
+            };
+            _canvas.BlockDropped += HandleBlockDropped;
  
             Load += (s, e) => DoRender();
+        }
+ 
+        /// <summary>
+        /// A block (or an existing chain of blocks picked up off the canvas)
+        /// dropped somewhere is translated into a real text edit at the
+        /// target line/indent, then the whole thing is reparsed - the source
+        /// textbox stays the single source of truth, so drag-drop editing and
+        /// direct text editing never fight each other or need separate sync
+        /// logic. When the payload came from an existing chain (RemoveFromLine
+        /// is set), its old lines are deleted first and the insertion index is
+        /// adjusted for the shift; dropping it back inside its own original
+        /// span is treated as a no-op rather than corrupting the source.
+        /// </summary>
+        private void HandleBlockDropped(DragPayload payload, DropSlot slot)
+        {
+            var lines = new List<string>(_input.Lines);
+            int insertAt = slot.After ? slot.Line + 1 : slot.Line;
+ 
+            if (payload.RemoveFromLine.HasValue && payload.RemoveToLineInclusive.HasValue)
+            {
+                int rf = payload.RemoveFromLine.Value, rt = payload.RemoveToLineInclusive.Value;
+                if (insertAt > rf && insertAt <= rt + 1) return; // dropped back inside its own span - no-op
+ 
+                if (rf >= 0 && rf < lines.Count)
+                {
+                    int count = Math.Min(rt - rf + 1, lines.Count - rf);
+                    lines.RemoveRange(rf, count);
+                    if (insertAt > rt) insertAt -= count;
+                }
+            }
+ 
+            insertAt = Math.Max(0, Math.Min(insertAt, lines.Count));
+            string indent = new string(' ', Math.Max(0, slot.IndentSpaces));
+            for (int k = 0; k < payload.Lines.Count; k++)
+                lines.Insert(insertAt + k, indent + payload.Lines[k]);
+ 
+            _input.Lines = lines.ToArray();
+            AppAssets.PlaySound("drop");
+            DoRender();
         }
  
         private void DoRender()
         {
             try
             {
+                var rawLines = _input.Lines;
                 var script = ScriptParser.Parse(_input.Text);
-                _canvas.SetScript(script);
+                _canvas.SetScript(script, rawLines);
                 _status.Text = $"{script.Count} top-level block(s) parsed.";
             }
             catch (Exception ex)

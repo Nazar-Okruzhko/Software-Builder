@@ -1924,7 +1924,7 @@ namespace PyBlocksViewer
         {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
             AutoScroll = true;
-            BackColor = Color.White;
+            BackColor = ColorTranslator.FromHtml("#DDDEDE");
             AllowDrop = true;
         }
  
@@ -2425,8 +2425,9 @@ namespace PyBlocksViewer
     /// A category button styled after the reference screenshot: a rounded
     /// ("squircle") tile with a diagonal gradient fill in the category's
     /// color, an icon (loaded from base/icons/&lt;category&gt;.png if present,
-    /// otherwise the same hand-drawn vector glyph used elsewhere), and a
-    /// label underneath. A thicker ring marks the currently-selected category.
+    /// otherwise the same hand-drawn vector glyph used elsewhere) BEFORE the
+    /// (capitalized) label, laid out horizontally. A thicker ring marks the
+    /// currently-selected category.
     /// </summary>
     internal sealed class CategoryButton : Control
     {
@@ -2438,10 +2439,9 @@ namespace PyBlocksViewer
         public CategoryButton(string key, string display, Color color)
         {
             CategoryKey = key;
-            _display = display;
+            _display = display.ToUpperInvariant();
             _color = color;
-            Width = 92;
-            Height = 58;
+            Height = 23;
             Cursor = Cursors.Hand;
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         }
@@ -2451,19 +2451,18 @@ namespace PyBlocksViewer
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
  
-            var rect = new RectangleF(1.5f, 1.5f, Width - 3f, Height - 3f);
-            using var path = Renderer.RoundedRectPath(rect.X, rect.Y, rect.Width, rect.Height, 12f);
+            var rect = new RectangleF(0.75f, 0.75f, Width - 1.5f, Height - 1.5f);
+            using var path = Renderer.RoundedRectPath(rect.X, rect.Y, rect.Width, rect.Height, 4f);
  
-            Color light = Renderer.Lighten(_color, 0.22f);
-            Color dark = Renderer.Darken(_color, 0.20f);
-            using (var grad = new LinearGradientBrush(rect, light, dark, LinearGradientMode.ForwardDiagonal))
+            Color top = Renderer.Lighten(_color, 0.10f);
+            using (var grad = new LinearGradientBrush(rect, top, Color.Black, LinearGradientMode.Vertical))
                 g.FillPath(grad, path);
  
-            using (var pen = new Pen(Renderer.Darken(_color, 0.42f), Selected ? 2.5f : 1f))
+            using (var pen = new Pen(Color.Black, Selected ? 2f : 1f))
                 g.DrawPath(pen, path);
  
-            const float iconSize = 20f;
-            float iconX = (Width - iconSize) / 2f, iconY = 6f;
+            const float iconSize = 14f;
+            float iconX = 5f, iconY = (Height - iconSize) / 2f;
             var img = AppAssets.Icon(CategoryKey);
             if (img != null)
                 g.DrawImage(img, new RectangleF(iconX, iconY, iconSize, iconSize));
@@ -2471,9 +2470,50 @@ namespace PyBlocksViewer
                 Renderer.DrawCategoryIcon(g, CategoryKey, iconX, iconY, iconSize, Color.White);
  
             using var textBrush = new SolidBrush(Color.White);
-            using var font = AppAssets.UiFont(7.75f, FontStyle.Bold);
-            using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Near, Trimming = StringTrimming.EllipsisCharacter };
-            g.DrawString(_display, font, textBrush, new RectangleF(2, iconY + iconSize + 3, Width - 4, Height - iconY - iconSize - 5), sf);
+            using var font = AppAssets.UiFont(7.25f, FontStyle.Bold);
+            using var sf = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter };
+            float textX = iconX + iconSize + 4f;
+            g.DrawString(_display, font, textBrush, new RectangleF(textX, 0, Width - textX - 4f, Height), sf);
+        }
+    }
+ 
+    /// <summary>
+    /// A sub-category divider bar (e.g. "CONDITIONS" under the FLOW category):
+    /// 19px tall, 4px squircle, filled in the category's color with white
+    /// capitalized text, separating groups of blocks within a category's list.
+    /// </summary>
+    internal sealed class SubCategoryBar : Control
+    {
+        private readonly string _label;
+        private readonly Color _color;
+ 
+        public SubCategoryBar(string label, Color color, int width)
+        {
+            _label = label.ToUpperInvariant();
+            _color = color;
+            Height = 19;
+            Width = width;
+            Margin = new Padding(2, 10, 2, 4);
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+        }
+ 
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            var rect = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
+            using var path = Renderer.RoundedRectPath(rect.X, rect.Y, rect.Width, rect.Height, 4f);
+ 
+            Color darkGrey = Color.FromArgb(128, 128, 128);
+            using (var brush = new SolidBrush(darkGrey))
+                g.FillPath(brush, path);
+            using (var pen = new Pen(Color.FromArgb(40, 40, 40), 1f))
+                g.DrawPath(pen, path);
+ 
+            using var textBrush = new SolidBrush(Color.White);
+            using var font = AppAssets.UiFont(7.5f, FontStyle.Bold);
+            using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            g.DrawString(_label, font, textBrush, rect, sf);
         }
     }
  
@@ -2487,9 +2527,9 @@ namespace PyBlocksViewer
         public PalettePanel()
         {
             Dock = DockStyle.Fill;
-            BackColor = Color.FromArgb(248, 248, 248);
+            BackColor = ColorTranslator.FromHtml("#FFFFFF");
  
-            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4 };
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = Color.Transparent };
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -2506,30 +2546,33 @@ namespace PyBlocksViewer
             };
             root.Controls.Add(title, 0, 0);
  
-            var searchWrap = new Panel { Dock = DockStyle.Top, Height = 32, Padding = new Padding(8, 0, 8, 4) };
-            _search = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "Search blocks..." };
-            _search.TextChanged += (s, e) => RefreshList();
-            searchWrap.Controls.Add(_search);
-            root.Controls.Add(searchWrap, 0, 1);
- 
+            // ---- category buttons: 23px tall, 4px squircle, 3 per row, 7px gaps ----
+            const int btnWidth = 116, gap = 7;
             var catFlow = new FlowLayoutPanel
             {
                 Dock = DockStyle.Top,
                 AutoSize = true,
                 FlowDirection = FlowDirection.LeftToRight,
                 WrapContents = true,
-                Padding = new Padding(4),
+                Padding = new Padding(8, 6, 8, 0),
             };
             foreach (var (key, display) in PaletteCatalog.Categories)
             {
                 var color = PyClassifier.CategoryColors.TryGetValue(key, out var c) ? c : Color.Gray;
-                var btn = new CategoryButton(key, display, color) { Margin = new Padding(3) };
+                var btn = new CategoryButton(key, display, color) { Width = btnWidth, Margin = new Padding(0, 0, gap, gap) };
                 string keyCopy = key;
                 btn.Click += (s, e) => { _currentCategory = keyCopy; _search.Text = ""; UpdateCategoryHighlight(); RefreshList(); };
                 _categoryButtons[key] = btn;
                 catFlow.Controls.Add(btn);
             }
-            root.Controls.Add(catFlow, 0, 2);
+            root.Controls.Add(catFlow, 0, 1);
+ 
+            // ---- search bar, below the category grid ----
+            var searchWrap = new Panel { Dock = DockStyle.Top, Height = 32, Padding = new Padding(8, 2, 8, 6) };
+            _search = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "Search blocks..." };
+            _search.TextChanged += (s, e) => RefreshList();
+            searchWrap.Controls.Add(_search);
+            root.Controls.Add(searchWrap, 0, 2);
  
             var scrollHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Color.White, Padding = new Padding(0) };
             _stencilFlow = new FlowLayoutPanel
@@ -2562,14 +2605,24 @@ namespace PyBlocksViewer
             _stencilFlow.Controls.Clear();
  
             string q = _search.Text.Trim();
-            IEnumerable<PaletteItem> items = q.Length > 0
-                ? PaletteCatalog.Items.Where(i =>
+            if (q.Length > 0)
+            {
+                var matches = PaletteCatalog.Items.Where(i =>
                     i.Label.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                    i.Template.Contains(q, StringComparison.OrdinalIgnoreCase))
-                : PaletteCatalog.ForCategory(_currentCategory);
- 
-            foreach (var item in items)
-                _stencilFlow.Controls.Add(new StencilTile(item));
+                    i.Template.Contains(q, StringComparison.OrdinalIgnoreCase));
+                foreach (var item in matches)
+                    _stencilFlow.Controls.Add(new StencilTile(item));
+            }
+            else
+            {
+                var color = PyClassifier.CategoryColors.TryGetValue(_currentCategory, out var c) ? c : Color.Gray;
+                foreach (var group in PaletteCatalog.ForCategory(_currentCategory).GroupBy(i => i.SubCategory))
+                {
+                    _stencilFlow.Controls.Add(new SubCategoryBar(group.Key, color, 340));
+                    foreach (var item in group)
+                        _stencilFlow.Controls.Add(new StencilTile(item));
+                }
+            }
  
             _stencilFlow.ResumeLayout();
         }
@@ -2738,7 +2791,7 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             // the form has laid out, so this is finalized in the Load handler.
  
             // ---- middle: canvas (drop target) + toolbar ----
-            var canvasHost = new Panel { Dock = DockStyle.Fill };
+            var canvasHost = new Panel { Dock = DockStyle.Fill, BackColor = ColorTranslator.FromHtml("#DDDEDE") };
             rightSplit.Panel1.Controls.Add(canvasHost);
  
             var toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 40, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(4) };
@@ -2760,7 +2813,7 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
  
             // ---- right: Python Code panel - directly editable, and where
             // dropped-block text edits land - collapsible via the toolbar button ----
-            var sourceHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(4) };
+            var sourceHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(4), BackColor = ColorTranslator.FromHtml("#DDDEDE") };
             rightSplit.Panel2.Controls.Add(sourceHost);
  
             var sourceLabel = new Label { Text = "Python Code (edit directly, or drag blocks from the left onto the canvas):", Dock = DockStyle.Top, Height = 20 };

@@ -40,6 +40,7 @@ using System.Drawing.Text;
 using System.IO;
 using System.Linq;
 using System.Media;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
@@ -56,7 +57,7 @@ namespace PyBlocksViewer
         {
             ApplicationConfiguration_Initialize();
             AppAssets.LoadFont();
-            if (AppAssets.CustomFamily != null) Renderer.ApplyCustomFont(AppAssets.CustomFamily);
+            Renderer.ApplyCustomFont(AppAssets.UiFamily);
             Application.Run(new MainForm());
         }
  
@@ -672,12 +673,14 @@ namespace PyBlocksViewer
     internal sealed class PaletteItem
     {
         public string Category;
-        public string Label;      // short name shown on the stencil
-        public string Template;   // the literal Python line(s) inserted (first line only if RequiresBody)
-        public bool RequiresBody; // true for compound statements (if/for/def/...) - a "    pass" placeholder body is inserted under it
-        public PaletteItem(string category, string label, string template, bool requiresBody = false)
+        public string SubCategory; // e.g. "Execution", "Conditions" under FLOW - rendered as a divider bar in the palette
+        public string Label;       // short name shown on the stencil
+        public string Template;    // the literal Python line(s) inserted (first line only if RequiresBody)
+        public bool RequiresBody;  // true for compound statements (if/for/def/...) - a "    pass" placeholder body is inserted under it
+        public PaletteItem(string category, string subCategory, string label, string template, bool requiresBody = false)
         {
             Category = category;
+            SubCategory = subCategory;
             Label = label;
             Template = template;
             RequiresBody = requiresBody;
@@ -693,80 +696,238 @@ namespace PyBlocksViewer
             ("ui", "UI"), ("time", "Time"), ("system", "System"), ("advanced", "Advanced"),
         };
  
+        // Mirrors the LVL1-LVL12 taxonomy exactly: category -> sub-category ->
+        // items, in the given order (sub-category order/grouping in the
+        // palette comes from this list's order, via GroupBy).
         public static readonly List<PaletteItem> Items = new()
         {
-            // ---- FLOW ----
-            new("flow", "if", "if condition:", requiresBody: true),
-            new("flow", "if / else", "if condition:", requiresBody: true), // else is added as a second drop; keep simple for now
-            new("flow", "for", "for item in range(10):", requiresBody: true),
-            new("flow", "while", "while condition:", requiresBody: true),
-            new("flow", "try / except", "try:", requiresBody: true),
-            new("flow", "break", "break"),
-            new("flow", "continue", "continue"),
-            new("flow", "return", "return value"),
-            new("flow", "pass", "pass"),
+            // ==================== LVL 1: FLOW ====================
+            new("flow", "Execution", "pass", "pass"),
+            new("flow", "Execution", "return", "return value"),
+            new("flow", "Execution", "yield", "yield value"),
  
-            // ---- VARIABLES ----
-            new("variables", "assign", "x = 0"),
-            new("variables", "increment", "x += 1"),
-            new("variables", "True", "True"),
-            new("variables", "False", "False"),
-            new("variables", "None", "None"),
+            new("flow", "Conditions", "if", "if condition:", requiresBody: true),
+            new("flow", "Conditions", "elif", "elif condition:", requiresBody: true),
+            new("flow", "Conditions", "else", "else:", requiresBody: true),
+            new("flow", "Conditions", "match", "match value:", requiresBody: true),
  
-            // ---- FUNCTIONS ----
-            new("functions", "def", "def my_function():", requiresBody: true),
-            new("functions", "lambda", "square = lambda x: x * x"),
-            new("functions", "@decorator", "@staticmethod"),
+            new("flow", "Loops", "for", "for item in range(10):", requiresBody: true),
+            new("flow", "Loops", "while", "while condition:", requiresBody: true),
+            new("flow", "Loops", "break", "break"),
+            new("flow", "Loops", "continue", "continue"),
  
-            // ---- OBJECTS ----
-            new("objects", "class", "class MyClass:", requiresBody: true),
-            new("objects", "__init__", "def __init__(self):", requiresBody: true),
-            new("objects", "self.attr", "self.value = 0"),
-            new("objects", "super()", "super().__init__()"),
+            new("flow", "Iteration Helpers", "range()", "range(10)"),
+            new("flow", "Iteration Helpers", "enumerate()", "enumerate(items)"),
+            new("flow", "Iteration Helpers", "zip()", "zip(a, b)"),
+            new("flow", "Iteration Helpers", "reversed()", "reversed(items)"),
  
-            // ---- DATA ----
-            new("data", "list.append", "my_list.append(item)"),
-            new("data", "list.pop", "my_list.pop()"),
-            new("data", "dict[key]", "my_dict[key] = value"),
-            new("data", "dict.get", "my_dict.get(key)"),
-            new("data", "set.add", "my_set.add(item)"),
+            new("flow", "Exceptions Flow", "try", "try:", requiresBody: true),
+            new("flow", "Exceptions Flow", "except", "except Exception:", requiresBody: true),
+            new("flow", "Exceptions Flow", "finally", "finally:", requiresBody: true),
+            new("flow", "Exceptions Flow", "raise", "raise Exception(\"error\")"),
  
-            // ---- TEXT ----
-            new("text", "f-string", "text = f\"value: {x}\""),
-            new("text", "split", "parts = text.split(\",\")"),
-            new("text", "strip", "text = text.strip()"),
-            new("text", "join", "text = \", \".join(parts)"),
+            // ==================== LVL 2: VARIABLES ====================
+            new("variables", "Assignment", "=", "x = value"),
+            new("variables", "Assignment", "+=", "x += 1"),
+            new("variables", "Assignment", "-=", "x -= 1"),
+            new("variables", "Assignment", "*=", "x *= 2"),
+            new("variables", "Assignment", "/=", "x /= 2"),
  
-            // ---- MATH ----
-            new("math", "arithmetic", "result = a + b"),
-            new("math", "abs", "abs(x)"),
-            new("math", "round", "round(x, 2)"),
-            new("math", "random", "random.randint(1, 10)"),
+            new("variables", "Types", "int", "x: int = 0"),
+            new("variables", "Types", "float", "x: float = 0.0"),
+            new("variables", "Types", "str", "x: str = \"\""),
+            new("variables", "Types", "bool", "x: bool = True"),
+            new("variables", "Types", "list", "x: list = []"),
+            new("variables", "Types", "dict", "x: dict = {}"),
  
-            // ---- FILES ----
-            new("files", "open (with)", "with open(\"file.txt\") as f:", requiresBody: true),
-            new("files", "write", "f.write(text)"),
-            new("files", "read", "text = f.read()"),
-            new("files", "os.path.exists", "os.path.exists(path)"),
+            new("variables", "Constants", "True", "True"),
+            new("variables", "Constants", "False", "False"),
+            new("variables", "Constants", "None", "None"),
  
-            // ---- UI ----
-            new("ui", "button", "button = Button()"),
-            new("ui", "window.show", "window.show()"),
-            new("ui", "on click", "def on_click():", requiresBody: true),
+            new("variables", "Conversion", "int()", "int(value)"),
+            new("variables", "Conversion", "float()", "float(value)"),
+            new("variables", "Conversion", "str()", "str(value)"),
+            new("variables", "Conversion", "bool()", "bool(value)"),
  
-            // ---- TIME ----
-            new("time", "sleep", "time.sleep(1)"),
-            new("time", "now", "timestamp = datetime.now()"),
+            // ==================== LVL 3: FUNCTIONS ====================
+            new("functions", "Definition", "def", "def my_function():", requiresBody: true),
+            new("functions", "Definition", "lambda", "square = lambda x: x * x"),
  
-            // ---- SYSTEM ----
-            new("system", "sys.exit", "sys.exit()"),
-            new("system", "sys.argv", "args = sys.argv"),
+            new("functions", "Return", "return", "return value"),
  
-            // ---- ADVANCED ----
-            new("advanced", "import", "import module"),
-            new("advanced", "from import", "from module import name"),
-            new("advanced", "async def", "async def handler():", requiresBody: true),
-            new("advanced", "await", "await task()"),
+            new("functions", "Parameters", "args (*args)", "def my_function(*args):", requiresBody: true),
+            new("functions", "Parameters", "kwargs (**kwargs)", "def my_function(**kwargs):", requiresBody: true),
+            new("functions", "Parameters", "default values", "def my_function(x=0):", requiresBody: true),
+ 
+            new("functions", "Scope", "global", "global x"),
+            new("functions", "Scope", "nonlocal", "nonlocal x"),
+ 
+            new("functions", "Decorators", "@property", "@property"),
+            new("functions", "Decorators", "@staticmethod", "@staticmethod"),
+            new("functions", "Decorators", "@classmethod", "@classmethod"),
+ 
+            // ==================== LVL 4: OBJECTS ====================
+            new("objects", "Classes", "class", "class MyClass:", requiresBody: true),
+            new("objects", "Classes", "self", "self.value = 0"),
+            new("objects", "Classes", "__init__", "def __init__(self):", requiresBody: true),
+ 
+            new("objects", "Attributes", "getattr", "getattr(obj, \"name\")"),
+            new("objects", "Attributes", "setattr", "setattr(obj, \"name\", value)"),
+ 
+            new("objects", "Methods", "instance method", "def method(self):", requiresBody: true),
+            new("objects", "Methods", "class method", "def method(cls):", requiresBody: true),
+            new("objects", "Methods", "static method", "def method():", requiresBody: true),
+ 
+            new("objects", "Inheritance", "super()", "super().__init__()"),
+            new("objects", "Inheritance", "override", "def method(self):", requiresBody: true),
+ 
+            // ==================== LVL 5: DATA ====================
+            new("data", "Lists", "append()", "my_list.append(item)"),
+            new("data", "Lists", "extend()", "my_list.extend(items)"),
+            new("data", "Lists", "insert()", "my_list.insert(0, item)"),
+            new("data", "Lists", "remove()", "my_list.remove(item)"),
+            new("data", "Lists", "pop()", "my_list.pop()"),
+            new("data", "Lists", "sort()", "my_list.sort()"),
+            new("data", "Lists", "reverse()", "my_list.reverse()"),
+ 
+            new("data", "Dictionaries", "keys()", "my_dict.keys()"),
+            new("data", "Dictionaries", "values()", "my_dict.values()"),
+            new("data", "Dictionaries", "items()", "my_dict.items()"),
+            new("data", "Dictionaries", "get()", "my_dict.get(key)"),
+            new("data", "Dictionaries", "update()", "my_dict.update(other)"),
+            new("data", "Dictionaries", "pop()", "my_dict.pop(key)"),
+ 
+            new("data", "Sets", "add()", "my_set.add(item)"),
+            new("data", "Sets", "remove()", "my_set.remove(item)"),
+            new("data", "Sets", "union()", "my_set.union(other)"),
+            new("data", "Sets", "intersection()", "my_set.intersection(other)"),
+ 
+            new("data", "Tuples", "indexing", "value = my_tuple[0]"),
+            new("data", "Tuples", "unpacking", "a, b = my_tuple"),
+ 
+            // ==================== LVL 6: TEXT ====================
+            new("text", "Creation", "str()", "text = str(value)"),
+            new("text", "Creation", "f-string", "text = f\"value: {x}\""),
+ 
+            new("text", "Manipulation", "upper()", "text.upper()"),
+            new("text", "Manipulation", "lower()", "text.lower()"),
+            new("text", "Manipulation", "strip()", "text.strip()"),
+            new("text", "Manipulation", "replace()", "text.replace(\"a\", \"b\")"),
+            new("text", "Manipulation", "split()", "text.split(\",\")"),
+            new("text", "Manipulation", "join()", "\", \".join(parts)"),
+ 
+            new("text", "Search", "find()", "text.find(\"sub\")"),
+            new("text", "Search", "index()", "text.index(\"sub\")"),
+            new("text", "Search", "startswith()", "text.startswith(\"a\")"),
+            new("text", "Search", "endswith()", "text.endswith(\"z\")"),
+            new("text", "Search", "in", "if \"a\" in text:", requiresBody: true),
+ 
+            new("text", "Formatting", "format()", "text.format(x)"),
+            new("text", "Formatting", "f-string", "text = f\"{x:.2f}\""),
+ 
+            // ==================== LVL 7: MATH ====================
+            new("math", "Arithmetic", "+", "result = a + b"),
+            new("math", "Arithmetic", "-", "result = a - b"),
+            new("math", "Arithmetic", "*", "result = a * b"),
+            new("math", "Arithmetic", "/", "result = a / b"),
+            new("math", "Arithmetic", "//", "result = a // b"),
+            new("math", "Arithmetic", "%", "result = a % b"),
+            new("math", "Arithmetic", "**", "result = a ** b"),
+ 
+            new("math", "Built-in Math", "abs()", "abs(x)"),
+            new("math", "Built-in Math", "round()", "round(x, 2)"),
+            new("math", "Built-in Math", "min()", "min(a, b)"),
+            new("math", "Built-in Math", "max()", "max(a, b)"),
+            new("math", "Built-in Math", "sum()", "sum(values)"),
+ 
+            new("math", "Random", "random()", "random.random()"),
+            new("math", "Random", "randint()", "random.randint(1, 10)"),
+            new("math", "Random", "choice()", "random.choice(items)"),
+            new("math", "Random", "shuffle()", "random.shuffle(items)"),
+ 
+            new("math", "Advanced", "sin()", "math.sin(x)"),
+            new("math", "Advanced", "cos()", "math.cos(x)"),
+            new("math", "Advanced", "tan()", "math.tan(x)"),
+            new("math", "Advanced", "sqrt()", "math.sqrt(x)"),
+ 
+            // ==================== LVL 8: FILES ====================
+            new("files", "Text Files", "open()", "f = open(\"file.txt\")"),
+            new("files", "Text Files", "read()", "text = f.read()"),
+            new("files", "Text Files", "readline()", "line = f.readline()"),
+            new("files", "Text Files", "write()", "f.write(text)"),
+            new("files", "Text Files", "append()", "f = open(\"file.txt\", \"a\")"),
+ 
+            new("files", "Binary Files", "rb", "f = open(\"file.bin\", \"rb\")"),
+            new("files", "Binary Files", "wb", "f = open(\"file.bin\", \"wb\")"),
+            new("files", "Binary Files", "readbytes()", "data = f.read()"),
+            new("files", "Binary Files", "writebytes()", "f.write(data)"),
+ 
+            new("files", "File System", "os.path.exists", "os.path.exists(path)"),
+            new("files", "File System", "os.remove", "os.remove(path)"),
+            new("files", "File System", "os.rename", "os.rename(old, new_name)"),
+            new("files", "File System", "os.listdir", "os.listdir(path)"),
+ 
+            new("files", "Paths", "join()", "os.path.join(a, b)"),
+            new("files", "Paths", "split()", "os.path.split(path)"),
+            new("files", "Paths", "basename()", "os.path.basename(path)"),
+ 
+            // ==================== LVL 9: UI ====================
+            new("ui", "Window", "create window", "window = Window()"),
+            new("ui", "Window", "show", "window.show()"),
+            new("ui", "Window", "hide", "window.hide()"),
+ 
+            new("ui", "Controls", "button", "button = Button()"),
+            new("ui", "Controls", "label", "label = Label()"),
+            new("ui", "Controls", "textbox", "textbox = TextBox()"),
+            new("ui", "Controls", "checkbox", "checkbox = Checkbox()"),
+            new("ui", "Controls", "slider", "slider = Slider()"),
+ 
+            new("ui", "Layout", "grid", "layout = Grid()"),
+            new("ui", "Layout", "vertical", "layout = VBox()"),
+            new("ui", "Layout", "horizontal", "layout = HBox()"),
+ 
+            new("ui", "Events", "click", "def on_click():", requiresBody: true),
+            new("ui", "Events", "hover", "def on_hover():", requiresBody: true),
+            new("ui", "Events", "change", "def on_change():", requiresBody: true),
+ 
+            // ==================== LVL 10: TIME ====================
+            new("time", "Current", "now()", "timestamp = datetime.now()"),
+            new("time", "Current", "timestamp()", "t = time.time()"),
+ 
+            new("time", "Sleep", "sleep()", "time.sleep(1)"),
+ 
+            new("time", "Formatting", "strftime()", "text = now.strftime(\"%Y-%m-%d\")"),
+            new("time", "Formatting", "parse", "date = datetime.strptime(text, \"%Y-%m-%d\")"),
+ 
+            // ==================== LVL 11: SYSTEM ====================
+            new("system", "OS", "platform", "sys.platform"),
+            new("system", "OS", "environment", "os.environ"),
+ 
+            new("system", "Process", "exit()", "sys.exit()"),
+            new("system", "Process", "argv", "args = sys.argv"),
+ 
+            new("system", "Clipboard", "copy", "clipboard.copy(text)"),
+            new("system", "Clipboard", "paste", "text = clipboard.paste()"),
+ 
+            // ==================== LVL 12: ADVANCED ====================
+            new("advanced", "Imports", "import", "import module"),
+            new("advanced", "Imports", "from", "from module import name"),
+ 
+            new("advanced", "Async", "async", "async def handler():", requiresBody: true),
+            new("advanced", "Async", "await", "await task()"),
+ 
+            new("advanced", "Generators", "yield", "yield value"),
+ 
+            new("advanced", "Typing", "type hints", "x: int = 0"),
+            new("advanced", "Typing", "Optional", "x: Optional[int] = None"),
+            new("advanced", "Typing", "List[T]", "x: List[int] = []"),
+ 
+            new("advanced", "Reflection", "getattr", "getattr(obj, \"name\")"),
+            new("advanced", "Reflection", "setattr", "setattr(obj, \"name\", value)"),
+            new("advanced", "Reflection", "hasattr", "hasattr(obj, \"name\")"),
+ 
+            new("advanced", "Memory / Internals", "gc", "gc.collect()"),
+            new("advanced", "Memory / Internals", "sys", "sys.exit()"),
         };
  
         public static IEnumerable<PaletteItem> ForCategory(string category) => Items.Where(i => i.Category == category);
@@ -791,7 +952,7 @@ namespace PyBlocksViewer
         public const float Radius = 4f;
         public const float NotchX = 14f;
         public const float NotchW = 18f;
-        public const float NotchH = 7f;
+        public const float NotchH = 5f;
         public const float NotchSlant = 4f;
         public const float InlineRowH = 20f;
         public const float MinBlockW = 46f;
@@ -1029,6 +1190,46 @@ namespace PyBlocksViewer
         }
  
         /// <summary>
+        /// Adds a small rounded fillet at an axis-aligned 90-degree turn: the
+        /// path arrives at 'corner' heading in direction (dirInX,dirInY) and
+        /// should leave heading in direction (dirOutX,dirOutY). Caller must
+        /// have already drawn the path up to exactly (corner - dirIn*r)
+        /// first (see StepCorner). Returns the point (corner + dirOut*r)
+        /// where the next straight segment continues from.
+        /// </summary>
+        private static PointF AddFilletCorner(GraphicsPath p, PointF corner, float dirInX, float dirInY, float dirOutX, float dirOutY, float r)
+        {
+            var p2 = new PointF(corner.X + dirOutX * r, corner.Y + dirOutY * r);
+            var center = new PointF(corner.X - dirInX * r + dirOutX * r, corner.Y - dirInY * r + dirOutY * r);
+ 
+            float startAngle = AngleOfDir(-dirOutX, -dirOutY);
+            float endAngle = AngleOfDir(dirInX, dirInY);
+            float sweep = endAngle - startAngle;
+            if (sweep > 180f) sweep -= 360f;
+            if (sweep < -180f) sweep += 360f;
+            if (Math.Abs(sweep) < 45f || Math.Abs(sweep) > 135f) sweep = sweep >= 0 ? 90f : -90f; // guard: should always be +-90 for our shapes
+ 
+            p.AddArc(center.X - r, center.Y - r, r * 2f, r * 2f, startAngle, sweep);
+            return p2;
+        }
+ 
+        private static float AngleOfDir(float dx, float dy)
+        {
+            if (dy > 0.5f) return 90f;
+            if (dy < -0.5f) return 270f;
+            if (dx > 0.5f) return 0f;
+            return 180f;
+        }
+ 
+        /// <summary>Draws a straight line up to r-before 'corner', then fillets the turn. Returns the new cursor position.</summary>
+        private static PointF StepCorner(GraphicsPath p, PointF cursor, PointF corner, float dirInX, float dirInY, float dirOutX, float dirOutY, float r)
+        {
+            var p1 = new PointF(corner.X - dirInX * r, corner.Y - dirInY * r);
+            p.AddLine(cursor, p1);
+            return AddFilletCorner(p, corner, dirInX, dirInY, dirOutX, dirOutY, r);
+        }
+ 
+        /// <summary>
         /// Traces the actual "C" cross-section of a C-block as one path: the
         /// header bar is sized to fit Mouths[0] (not the widest mouth
         /// anywhere in the block), each elif/else/except/finally bar is sized
@@ -1039,7 +1240,9 @@ namespace PyBlocksViewer
         /// of the wall during a mouth row, so that area is genuinely open
         /// (whatever is drawn underneath shows through). Closed with the
         /// usual notch on top (or an arch, for a class/def "starter" block)
-        /// and a tab on the bottom.
+        /// and a tab on the bottom. Every bar-to-bar step is a small rounded
+        /// fillet rather than a sharp right angle, so top/middle/bottom bars
+        /// all read as consistently "squircle" rather than boxy.
         /// </summary>
         private static GraphicsPath BuildCBlockOutlinePath(BlockNode b, float x, float y)
         {
@@ -1052,24 +1255,29 @@ namespace PyBlocksViewer
  
             var p = new GraphicsPath();
             p.StartFigure();
+            PointF cursor;
  
             if (b.HatTop)
             {
-                p.AddArc(new RectangleF(x, y, b.BarW[0], HatBulge * 2f), 180, 180); // peaks at y, lands at y+HatBulge
+                p.AddArc(new RectangleF(x, y, b.BarW[0], HatBulge * 2f), 180, 180);
+                cursor = new PointF(headerRight, y + HatBulge);
             }
             else
             {
-                p.AddArc(x, y, d, d, 180, 90); // top-left corner
+                p.AddArc(x, y, d, d, 180, 90);
+                cursor = new PointF(x + r, y);
  
                 if (fitsHeader)
                 {
-                    p.AddLine(x + r, y, x + NotchX, y);
-                    p.AddLine(x + NotchX, y, x + NotchX + NotchSlant, y + NotchH);
-                    p.AddLine(x + NotchX + NotchSlant, y + NotchH, x + NotchX + NotchW - NotchSlant, y + NotchH);
-                    p.AddLine(x + NotchX + NotchW - NotchSlant, y + NotchH, x + NotchX + NotchW, y);
+                    p.AddLine(cursor, new PointF(x + NotchX, y));
+                    p.AddLine(new PointF(x + NotchX, y), new PointF(x + NotchX + NotchSlant, y + NotchH));
+                    p.AddLine(new PointF(x + NotchX + NotchSlant, y + NotchH), new PointF(x + NotchX + NotchW - NotchSlant, y + NotchH));
+                    p.AddLine(new PointF(x + NotchX + NotchW - NotchSlant, y + NotchH), new PointF(x + NotchX + NotchW, y));
+                    cursor = new PointF(x + NotchX + NotchW, y);
                 }
  
-                p.AddArc(headerRight - d, y, d, d, 270, 90); // top-right corner of the header bar
+                p.AddArc(headerRight - d, y, d, d, 270, 90);
+                cursor = new PointF(headerRight, y + r);
             }
  
             float curY = y + b.HeaderH;
@@ -1078,16 +1286,24 @@ namespace PyBlocksViewer
             for (int m = 0; m < b.Mouths.Count; m++)
             {
                 float mouthBottom = curY + b.MouthH[m];
-                p.AddLine(curRight, curY, wallRight, curY);         // step inward: top of the mouth
-                p.AddLine(wallRight, curY, wallRight, mouthBottom); // down the narrow inner wall
+                float sr = Math.Max(0f, Math.Min(5f, Math.Min(b.MouthH[m], Indent) * 0.4f));
+ 
+                cursor = StepCorner(p, cursor, new PointF(curRight, curY), 0f, 1f, -1f, 0f, sr);   // down -> left
+                cursor = StepCorner(p, cursor, new PointF(wallRight, curY), -1f, 0f, 0f, 1f, sr);  // left -> down
+                p.AddLine(cursor, new PointF(wallRight, mouthBottom));
+                cursor = new PointF(wallRight, mouthBottom);
                 curY = mouthBottom;
  
                 if (m < b.ContinuationHeaders.Count)
                 {
                     float contRight = x + b.BarW[m + 1];
                     float contBottom = curY + b.ContinuationHeaderH[m];
-                    p.AddLine(wallRight, curY, contRight, curY);       // step back out: this continuation's own width
-                    p.AddLine(contRight, curY, contRight, contBottom); // down through the continuation bar
+                    float sr2 = Math.Max(0f, Math.Min(5f, Math.Min(b.ContinuationHeaderH[m], Indent) * 0.4f));
+ 
+                    cursor = StepCorner(p, cursor, new PointF(wallRight, curY), 0f, 1f, 1f, 0f, sr2);   // down -> right
+                    cursor = StepCorner(p, cursor, new PointF(contRight, curY), 1f, 0f, 0f, 1f, sr2);   // right -> down
+                    p.AddLine(cursor, new PointF(contRight, contBottom));
+                    cursor = new PointF(contRight, contBottom);
                     curY = contBottom;
                     curRight = contRight;
                 }
@@ -1096,18 +1312,20 @@ namespace PyBlocksViewer
             float footerRight = x + b.FooterW;
             float footerBottom = curY + b.FooterH;
             bool fitsFooter = b.FooterW > NotchX + NotchW + 4;
+            float srF = Math.Max(0f, Math.Min(5f, Math.Min(b.FooterH, Indent) * 0.4f));
  
-            p.AddLine(wallRight, curY, footerRight, curY);
-            p.AddLine(footerRight, curY, footerRight, footerBottom);
+            cursor = StepCorner(p, cursor, new PointF(wallRight, curY), 0f, 1f, 1f, 0f, srF);   // down -> right (wall into footer)
+            cursor = StepCorner(p, cursor, new PointF(footerRight, curY), 1f, 0f, 0f, 1f, srF);  // right -> down
+            p.AddLine(cursor, new PointF(footerRight, footerBottom));
  
             p.AddArc(footerRight - d, footerBottom - d, d, d, 0, 90); // bottom-right corner
  
             if (fitsFooter)
             {
-                p.AddLine(footerRight - r, footerBottom, x + NotchX + NotchW, footerBottom);
-                p.AddLine(x + NotchX + NotchW, footerBottom, x + NotchX + NotchW - NotchSlant, footerBottom + NotchH);
-                p.AddLine(x + NotchX + NotchW - NotchSlant, footerBottom + NotchH, x + NotchX + NotchSlant, footerBottom + NotchH);
-                p.AddLine(x + NotchX + NotchSlant, footerBottom + NotchH, x + NotchX, footerBottom);
+                p.AddLine(new PointF(footerRight - r, footerBottom), new PointF(x + NotchX + NotchW, footerBottom));
+                p.AddLine(new PointF(x + NotchX + NotchW, footerBottom), new PointF(x + NotchX + NotchW - NotchSlant, footerBottom + NotchH));
+                p.AddLine(new PointF(x + NotchX + NotchW - NotchSlant, footerBottom + NotchH), new PointF(x + NotchX + NotchSlant, footerBottom + NotchH));
+                p.AddLine(new PointF(x + NotchX + NotchSlant, footerBottom + NotchH), new PointF(x + NotchX, footerBottom));
             }
  
             p.AddArc(x, footerBottom - d, d, d, 90, 90); // bottom-left corner
@@ -1652,12 +1870,48 @@ namespace PyBlocksViewer
         public List<string> Lines = new();
         public int? RemoveFromLine;
         public int? RemoveToLineInclusive;
+ 
+        /// <summary>
+        /// Computes the resulting source lines if this payload were inserted
+        /// at the given drop slot: removes its own original lines first (if
+        /// it's a move, not a fresh palette insert) and adjusts the
+        /// insertion index for that shift, then inserts the (re-indented)
+        /// payload lines. Returns null for a no-op (dropped back inside its
+        /// own original span). Shared by the live drag preview and the real
+        /// commit-on-drop so they can never disagree with each other.
+        /// </summary>
+        public List<string>? ApplyTo(string[] currentLines, DropSlot slot)
+        {
+            var lines = new List<string>(currentLines);
+            int insertAt = slot.After ? slot.Line + 1 : slot.Line;
+ 
+            if (RemoveFromLine.HasValue && RemoveToLineInclusive.HasValue)
+            {
+                int rf = RemoveFromLine.Value, rt = RemoveToLineInclusive.Value;
+                if (insertAt > rf && insertAt <= rt + 1) return null; // dropped back inside its own span
+ 
+                if (rf >= 0 && rf < lines.Count)
+                {
+                    int count = Math.Min(rt - rf + 1, lines.Count - rf);
+                    lines.RemoveRange(rf, count);
+                    if (insertAt > rt) insertAt -= count;
+                }
+            }
+ 
+            insertAt = Math.Max(0, Math.Min(insertAt, lines.Count));
+            string indent = new string(' ', Math.Max(0, slot.IndentSpaces));
+            for (int k = 0; k < Lines.Count; k++)
+                lines.Insert(insertAt + k, indent + Lines[k]);
+ 
+            return lines;
+        }
     }
  
     internal sealed class BlockCanvas : Panel
     {
         public List<BlockNode> Script = new();
-        private string[] _rawLines = Array.Empty<string>();
+        private List<BlockNode> _committedScript = new();
+        private string[] _committedRawLines = Array.Empty<string>();
         private const float MarginX = 20f, MarginY = 20f;
  
         /// <summary>Fired on a successful drop: the dragged payload, and where to insert it.</summary>
@@ -1676,8 +1930,14 @@ namespace PyBlocksViewer
  
         public void SetScript(List<BlockNode> script, string[] rawLines)
         {
+            _committedScript = script;
+            _committedRawLines = rawLines;
+            ApplyDisplayScript(script);
+        }
+ 
+        private void ApplyDisplayScript(List<BlockNode> script)
+        {
             Script = script;
-            _rawLines = rawLines;
             using (var bmp = new Bitmap(1, 1))
             using (var g = Graphics.FromImage(bmp))
             {
@@ -1694,41 +1954,16 @@ namespace PyBlocksViewer
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
             g.TranslateTransform(AutoScrollPosition.X + MarginX, AutoScrollPosition.Y + MarginY);
+ 
+            // While dragging, Script has ALREADY been swapped (see OnDragOver)
+            // for the real would-be result of the drop - the rest of the
+            // script genuinely reflows to make room, live, rather than just
+            // showing a static overlay on top of the unchanged original.
             Renderer.DrawStack(Script, g, 0, 0);
  
             if (_preview.HasValue)
             {
                 var d = _preview.Value;
- 
-                // Ghost: the ACTUAL dragged block(s), rendered translucently
-                // right where they'd land, so you can see how they'll connect
-                // before you let go - not just a bare insertion line.
-                if (_dragPreviewPayload != null)
-                {
-                    try
-                    {
-                        var ghostScript = ScriptParser.Parse(string.Join("\n", _dragPreviewPayload.Lines));
-                        Renderer.MeasureStack(ghostScript, g, out float gw, out float gh);
-                        int bw = Math.Max(1, (int)Math.Ceiling(gw) + 4);
-                        int bh = Math.Max(1, (int)Math.Ceiling(gh) + 4);
-                        using var ghostBmp = new Bitmap(bw, bh, PixelFormat.Format32bppArgb);
-                        using (var gg = Graphics.FromImage(ghostBmp))
-                        {
-                            gg.SmoothingMode = SmoothingMode.AntiAlias;
-                            Renderer.DrawStack(ghostScript, gg, 2, 2);
-                        }
-                        var matrix = new ColorMatrix { Matrix33 = 0.55f }; // 55% opacity
-                        using var attrs = new ImageAttributes();
-                        attrs.SetColorMatrix(matrix);
-                        var dest = new Rectangle((int)d.PreviewX, (int)(d.Y + 5f), bw, bh);
-                        g.DrawImage(ghostBmp, dest, 0, 0, bw, bh, GraphicsUnit.Pixel, attrs);
-                    }
-                    catch
-                    {
-                        // a malformed in-flight drag payload should never break painting
-                    }
-                }
- 
                 using var pen = new Pen(Color.FromArgb(230, 40, 160, 40), 3f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
                 g.DrawLine(pen, d.PreviewX, d.Y, d.PreviewX + d.PreviewW, d.Y);
                 using var dot = new SolidBrush(Color.FromArgb(230, 40, 160, 40));
@@ -1776,12 +2011,40 @@ namespace PyBlocksViewer
         protected override void OnDragOver(DragEventArgs e)
         {
             base.OnDragOver(e);
-            if (e.Data == null || !e.Data.GetDataPresent(typeof(DragPayload))) { e.Effect = DragDropEffects.None; _preview = null; _dragPreviewPayload = null; Invalidate(); return; }
+            if (e.Data == null || !e.Data.GetDataPresent(typeof(DragPayload)))
+            {
+                e.Effect = DragDropEffects.None;
+                _preview = null;
+                _dragPreviewPayload = null;
+                ApplyDisplayScript(_committedScript);
+                return;
+            }
             e.Effect = DragDropEffects.Copy;
             var pt = ToContentPoint(e.X, e.Y);
             _preview = ComputeDropSlot(pt.X, pt.Y);
             _dragPreviewPayload = e.Data.GetData(typeof(DragPayload)) as DragPayload;
-            Invalidate();
+ 
+            // Live reflow: actually build and show what the script would look
+            // like if dropped HERE right now, rather than a static overlay on
+            // top of the unchanged original - the rest of the blocks visibly
+            // shift to make room, same as the real drop will produce.
+            if (_dragPreviewPayload != null && _preview.HasValue)
+            {
+                var previewLines = _dragPreviewPayload.ApplyTo(_committedRawLines, _preview.Value);
+                if (previewLines != null)
+                {
+                    try { ApplyDisplayScript(ScriptParser.Parse(string.Join("\n", previewLines))); }
+                    catch { ApplyDisplayScript(_committedScript); }
+                }
+                else
+                {
+                    ApplyDisplayScript(_committedScript);
+                }
+            }
+            else
+            {
+                ApplyDisplayScript(_committedScript);
+            }
         }
  
         protected override void OnDragLeave(EventArgs e)
@@ -1789,7 +2052,7 @@ namespace PyBlocksViewer
             base.OnDragLeave(e);
             _preview = null;
             _dragPreviewPayload = null;
-            Invalidate();
+            ApplyDisplayScript(_committedScript);
         }
  
         protected override void OnDragDrop(DragEventArgs e)
@@ -1797,13 +2060,15 @@ namespace PyBlocksViewer
             base.OnDragDrop(e);
             _preview = null;
             _dragPreviewPayload = null;
-            if (e.Data == null || !e.Data.GetDataPresent(typeof(DragPayload))) { Invalidate(); return; }
-            if (e.Data.GetData(typeof(DragPayload)) is not DragPayload payload) { Invalidate(); return; }
+            if (e.Data == null || !e.Data.GetDataPresent(typeof(DragPayload))) { ApplyDisplayScript(_committedScript); return; }
+            if (e.Data.GetData(typeof(DragPayload)) is not DragPayload payload) { ApplyDisplayScript(_committedScript); return; }
  
             var pt = ToContentPoint(e.X, e.Y);
             var slot = ComputeDropSlot(pt.X, pt.Y);
             if (slot.HasValue) BlockDropped?.Invoke(payload, slot.Value);
-            Invalidate();
+            // BlockDropped's handler re-parses the real source and calls
+            // SetScript, which updates _committedScript - no need to revert
+            // here, that call already supersedes the live-preview display.
         }
  
         // ---- picking up an EXISTING block (and everything chained below it) ----
@@ -1833,17 +2098,17 @@ namespace PyBlocksViewer
  
             var (stack, index) = _armedChain.Value;
             var chain = stack.Skip(index).ToList();
-            if (chain.Count == 0 || _rawLines.Length == 0) return;
+            if (chain.Count == 0 || _committedRawLines.Length == 0) return;
  
             int rf = chain[0].SourceLine;
             int rt = chain[^1].EndLine;
-            if (rf < 0 || rt < rf || rt >= _rawLines.Length) return;
+            if (rf < 0 || rt < rf || rt >= _committedRawLines.Length) return;
  
-            int baseIndent = CountLeadingSpaces(_rawLines[rf]);
+            int baseIndent = CountLeadingSpaces(_committedRawLines[rf]);
             var relLines = new List<string>();
             for (int ln = rf; ln <= rt; ln++)
             {
-                string raw = _rawLines[ln].Replace("\t", "    ");
+                string raw = _committedRawLines[ln].Replace("\t", "    ");
                 int lead = CountLeadingSpaces(raw);
                 int keep = Math.Max(0, lead - baseIndent);
                 relLines.Add(new string(' ', keep) + raw.TrimStart(' '));
@@ -1918,7 +2183,7 @@ namespace PyBlocksViewer
         private DropSlot? ComputeDropSlot(float cx, float cy)
         {
             var candidates = new List<DropSlot>();
-            CollectDropSlots(Script, 0f, 0, candidates);
+            CollectDropSlots(_committedScript, 0f, 0, candidates);
             if (candidates.Count == 0) return null;
  
             const float indentTolerance = 10f;
@@ -1999,7 +2264,7 @@ namespace PyBlocksViewer
         {
             try
             {
-                string path = Path.Combine(BaseDir, "fonts", "Arial.ttf");
+                string path = Path.Combine(BaseDir, "fonts", "Lucida Grande.ttf");
                 if (File.Exists(path))
                 {
                     FontCollection.AddFontFile(path);
@@ -2013,7 +2278,22 @@ namespace PyBlocksViewer
         }
  
         /// <summary>The app's UI font family - the custom one if base/fonts supplied it, otherwise the same generic sans-serif used before.</summary>
-        public static FontFamily UiFamily => CustomFamily ?? FontFamily.GenericSansSerif;
+        private static readonly FontFamily ArialOrFallback = TryGetFamily("Arial") ?? FontFamily.GenericSansSerif;
+ 
+        private static FontFamily? TryGetFamily(string name)
+        {
+            try
+            {
+                var f = new FontFamily(name);
+                return f;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+ 
+        public static FontFamily UiFamily => CustomFamily ?? ArialOrFallback;
  
         public static Font UiFont(float size, FontStyle style = FontStyle.Regular) => new(UiFamily, size, style);
  
@@ -2069,13 +2349,28 @@ namespace PyBlocksViewer
     internal sealed class StencilTile : Panel
     {
         public readonly PaletteItem Item;
+        private readonly List<BlockNode> _previewScript;
         private Point _mouseDownPt;
         private bool _armed;
  
         public StencilTile(PaletteItem item)
         {
             Item = item;
-            Height = 48;
+            string src = item.Template + (item.RequiresBody ? "\n    pass" : "");
+            _previewScript = ScriptParser.Parse(src);
+ 
+            // Measured ONCE here, at construction, so the tile is sized to the
+            // block's real full-scale dimensions - no shrink-to-fit scaling,
+            // and no dependency on a container width that might not have
+            // settled yet (that dependency was the actual bug behind tiles
+            // looking tiny and then growing after a few category clicks).
+            float naturalW, naturalH;
+            using (var bmp = new Bitmap(1, 1))
+            using (var g = Graphics.FromImage(bmp))
+                Renderer.MeasureStack(_previewScript, g, out naturalW, out naturalH);
+ 
+            Width = (int)Math.Ceiling(naturalW) + 16;
+            Height = (int)Math.Ceiling(naturalH) + 12;
             Margin = new Padding(6, 4, 6, 4);
             Cursor = Cursors.Hand;
             BackColor = Color.White;
@@ -2092,22 +2387,10 @@ namespace PyBlocksViewer
  
             try
             {
-                string src = Item.Template + (Item.RequiresBody ? "\n    pass" : "");
-                var script = ScriptParser.Parse(src);
-                Renderer.MeasureStack(script, g, out float w, out float h);
-                float availW = Width - 12f, availH = Height - 8f;
-                float scale = Math.Min(availW / Math.Max(w, 1f), availH / Math.Max(h, 1f));
-                scale = Math.Min(scale, 1f);
- 
-                var state = g.Save();
-                g.TranslateTransform(6f, 4f);
-                if (scale < 1f) g.ScaleTransform(scale, scale);
-                Renderer.DrawStack(script, g, 0, 0);
-                g.Restore(state);
+                Renderer.DrawStack(_previewScript, g, 8, 6); // always full scale - no shrinking
             }
             catch
             {
-                // A malformed template should never take the palette down with it.
                 using var f = new SolidBrush(Color.Gray);
                 g.DrawString(Item.Label, SystemFonts.DefaultFont, f, 6, 6);
             }
@@ -2255,10 +2538,8 @@ namespace PyBlocksViewer
                 WrapContents = false,
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                Width = scrollHost.ClientSize.Width - 4,
             };
             scrollHost.Controls.Add(_stencilFlow);
-            scrollHost.Resize += (s, e) => _stencilFlow.Width = Math.Max(100, scrollHost.ClientSize.Width - 20);
             root.Controls.Add(scrollHost, 0, 3);
  
             UpdateCategoryHighlight();
@@ -2288,11 +2569,80 @@ namespace PyBlocksViewer
                 : PaletteCatalog.ForCategory(_currentCategory);
  
             foreach (var item in items)
-            {
-                var tile = new StencilTile(item) { Width = _stencilFlow.Width - 4 };
-                _stencilFlow.Controls.Add(tile);
-            }
+                _stencilFlow.Controls.Add(new StencilTile(item));
+ 
             _stencilFlow.ResumeLayout();
+        }
+    }
+ 
+    // =========================================================================
+    // A RichTextBox with IDLE-style syntax highlighting. Full-document
+    // re-highlight on every (debounced) edit - simple, and fast enough for
+    // scripts this app's scale. WM_SETREDRAW suppresses the flicker/caret-
+    // jump that repeated SelectionColor changes would otherwise cause.
+    // =========================================================================
+    internal sealed class PythonSyntaxBox : RichTextBox
+    {
+        [DllImport("user32.dll")]
+        private static extern int SendMessage(IntPtr hWnd, int msg, bool wParam, int lParam);
+        private const int WM_SETREDRAW = 11;
+ 
+        private static readonly string[] Keywords =
+        {
+            "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
+            "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
+            "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise",
+            "return", "try", "while", "with", "yield",
+        };
+        private static readonly Regex KeywordPattern = new(@"\b(" + string.Join("|", Keywords) + @")\b", RegexOptions.Compiled);
+        private static readonly Regex DefNamePattern = new(@"\b(?:def|class)\s+(\w+)", RegexOptions.Compiled);
+        private static readonly Regex StringPattern = new(
+            "(?:[fFrRbB]{0,2})(?:\"\"\"(?:[^\\\\]|\\\\.)*?\"\"\"|'''(?:[^\\\\]|\\\\.)*?'''|\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*')",
+            RegexOptions.Compiled);
+        private static readonly Regex CommentPattern = new("#.*$", RegexOptions.Compiled | RegexOptions.Multiline);
+ 
+        // Classic IDLE default theme colors.
+        private static readonly Color KeywordColor = Color.FromArgb(255, 119, 0);
+        private static readonly Color StringColor = Color.FromArgb(0, 128, 0);
+        private static readonly Color CommentColor = Color.FromArgb(200, 0, 0);
+        private static readonly Color DefNameColor = Color.FromArgb(0, 0, 205);
+ 
+        public void ApplyHighlighting()
+        {
+            if (!IsHandleCreated) return;
+            int selStart = SelectionStart, selLen = SelectionLength;
+            SendMessage(Handle, WM_SETREDRAW, false, 0);
+            try
+            {
+                string text = Text;
+                SelectAll();
+                SelectionColor = Color.Black;
+ 
+                foreach (Match m in KeywordPattern.Matches(text)) Colorize(m.Index, m.Length, KeywordColor);
+                foreach (Match m in DefNamePattern.Matches(text))
+                {
+                    var g = m.Groups[1];
+                    Colorize(g.Index, g.Length, DefNameColor);
+                }
+                foreach (Match m in StringPattern.Matches(text)) Colorize(m.Index, m.Length, StringColor);
+                foreach (Match m in CommentPattern.Matches(text)) Colorize(m.Index, m.Length, CommentColor);
+            }
+            finally
+            {
+                SelectionStart = Math.Min(selStart, TextLength);
+                SelectionLength = Math.Min(Math.Max(0, selLen), Math.Max(0, TextLength - SelectionStart));
+                SelectionColor = Color.Black;
+                SendMessage(Handle, WM_SETREDRAW, true, 0);
+                Invalidate();
+            }
+        }
+ 
+        private void Colorize(int index, int length, Color color)
+        {
+            if (index < 0 || length <= 0 || index >= TextLength) return;
+            length = Math.Min(length, TextLength - index);
+            Select(index, length);
+            SelectionColor = color;
         }
     }
  
@@ -2301,7 +2651,7 @@ namespace PyBlocksViewer
     // =========================================================================
     internal sealed class MainForm : Form
     {
-        private readonly TextBox _input;
+        private readonly PythonSyntaxBox _input;
         private readonly BlockCanvas _canvas;
         private readonly System.Windows.Forms.Timer _debounce;
         private readonly Label _status;
@@ -2368,7 +2718,7 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             var outerSplit = new SplitContainer
             {
                 Dock = DockStyle.Fill,
-                SplitterDistance = 300,
+                SplitterDistance = 400,
                 FixedPanel = FixedPanel.Panel1,
             };
             Controls.Add(outerSplit);
@@ -2380,9 +2730,12 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             {
                 Dock = DockStyle.Fill,
                 Orientation = Orientation.Vertical, // splitter is vertical -> panels sit side by side (Canvas | Source)
-                SplitterDistance = 700,
+                FixedPanel = FixedPanel.Panel2,
             };
             outerSplit.Panel2.Controls.Add(rightSplit);
+            // Panel2 (Python Code) is fixed at 300px; SplitterDistance has to be
+            // set from the container's actual width, which isn't known until
+            // the form has laid out, so this is finalized in the Load handler.
  
             // ---- middle: canvas (drop target) + toolbar ----
             var canvasHost = new Panel { Dock = DockStyle.Fill };
@@ -2413,14 +2766,15 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             var sourceLabel = new Label { Text = "Python Code (edit directly, or drag blocks from the left onto the canvas):", Dock = DockStyle.Top, Height = 20 };
             sourceHost.Controls.Add(sourceLabel);
  
-            _input = new TextBox
+            _input = new PythonSyntaxBox
             {
                 Multiline = true,
                 Dock = DockStyle.Fill,
                 Font = new Font(FontFamily.GenericMonospace, 9.5f),
-                ScrollBars = ScrollBars.Both,
+                ScrollBars = RichTextBoxScrollBars.Both,
                 AcceptsTab = true,
                 Text = SampleScript,
+                WordWrap = false,
             };
             sourceHost.Controls.Add(_input);
             _input.BringToFront();
@@ -2431,7 +2785,7 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             _status.BringToFront();
  
             _debounce = new System.Windows.Forms.Timer { Interval = 250 };
-            _debounce.Tick += (s, e) => { _debounce.Stop(); DoRender(); };
+            _debounce.Tick += (s, e) => { _debounce.Stop(); DoRender(); _input.ApplyHighlighting(); };
  
             _input.TextChanged += (s, e) => { _debounce.Stop(); _debounce.Start(); };
             renderBtn.Click += (s, e) => DoRender();
@@ -2444,7 +2798,12 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             };
             _canvas.BlockDropped += HandleBlockDropped;
  
-            Load += (s, e) => DoRender();
+            Load += (s, e) =>
+            {
+                rightSplit.SplitterDistance = Math.Max(150, rightSplit.Width - 300);
+                DoRender();
+                _input.ApplyHighlighting();
+            };
         }
  
         /// <summary>
@@ -2460,28 +2819,10 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
         /// </summary>
         private void HandleBlockDropped(DragPayload payload, DropSlot slot)
         {
-            var lines = new List<string>(_input.Lines);
-            int insertAt = slot.After ? slot.Line + 1 : slot.Line;
+            var resultLines = payload.ApplyTo(_input.Lines, slot);
+            if (resultLines == null) return; // dropped back inside its own original span - no-op
  
-            if (payload.RemoveFromLine.HasValue && payload.RemoveToLineInclusive.HasValue)
-            {
-                int rf = payload.RemoveFromLine.Value, rt = payload.RemoveToLineInclusive.Value;
-                if (insertAt > rf && insertAt <= rt + 1) return; // dropped back inside its own span - no-op
- 
-                if (rf >= 0 && rf < lines.Count)
-                {
-                    int count = Math.Min(rt - rf + 1, lines.Count - rf);
-                    lines.RemoveRange(rf, count);
-                    if (insertAt > rt) insertAt -= count;
-                }
-            }
- 
-            insertAt = Math.Max(0, Math.Min(insertAt, lines.Count));
-            string indent = new string(' ', Math.Max(0, slot.IndentSpaces));
-            for (int k = 0; k < payload.Lines.Count; k++)
-                lines.Insert(insertAt + k, indent + payload.Lines[k]);
- 
-            _input.Lines = lines.ToArray();
+            _input.Lines = resultLines.ToArray();
             AppAssets.PlaySound("drop");
             DoRender();
         }

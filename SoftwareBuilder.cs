@@ -118,6 +118,8 @@ namespace PyBlocksViewer
     {
         public string Text;
         public PillKind Kind;
+        public int StartCol = -1; // absolute column (from line start, including indentation) where this token begins
+        public int EndCol = -1;   // exclusive end column
         public PillNode(string text, PillKind kind)
         {
             Text = text;
@@ -157,6 +159,7 @@ namespace PyBlocksViewer
         // Used to translate a drag-drop target back into a real text edit.
         public int SourceLine = -1;
         public int EndLine = -1;
+        public List<int> ContinuationLine = new(); // raw line for each entry in ContinuationHeaders, same indices
  
         // Mouths[0] is the body directly under Header; Mouths[k+1] is the body
         // under ContinuationHeaders[k].
@@ -232,7 +235,7 @@ namespace PyBlocksViewer
                 var (raw, indent, text) = lines[i];
                 i++;
                 string trimmed = text.TrimStart();
-                var block = BuildLineNode(trimmed);
+                var block = BuildLineNode(trimmed, indent);
                 block.SourceLine = raw;
                 block.EndLine = raw;
  
@@ -248,9 +251,11 @@ namespace PyBlocksViewer
                     while (i < lines.Count && lines[i].indent == indent && IsContinuationKeyword(lines[i].text.TrimStart()))
                     {
                         int contRaw = lines[i].raw;
+                        int contIndent = lines[i].indent;
                         string contText = lines[i].text.TrimStart();
                         i++;
-                        block.ContinuationHeaders.Add(BuildHeaderNodes(contText));
+                        block.ContinuationHeaders.Add(BuildHeaderNodes(contText, contIndent));
+                        block.ContinuationLine.Add(contRaw);
                         block.EndLine = contRaw;
                         int contChildIndent = (i < lines.Count && lines[i].indent > indent) ? lines[i].indent : indent + 4;
                         block.Mouths.Add(ParseBlock(lines, ref i, contChildIndent));
@@ -267,9 +272,9 @@ namespace PyBlocksViewer
             return result;
         }
  
-        private static BlockNode BuildLineNode(string trimmed)
+        private static BlockNode BuildLineNode(string trimmed, int indent)
         {
-            var block = new BlockNode { Header = BuildHeaderNodes(trimmed) };
+            var block = new BlockNode { Header = BuildHeaderNodes(trimmed, indent) };
             string codePart = StripComment(trimmed).TrimEnd();
  
             if (trimmed.StartsWith("#"))
@@ -291,7 +296,7 @@ namespace PyBlocksViewer
         /// plain code text / literal input pills / variable pills, with any
         /// trailing "# comment" re-appended as plain text afterwards.
         /// </summary>
-        private static List<Node> BuildHeaderNodes(string trimmed)
+        private static List<Node> BuildHeaderNodes(string trimmed, int indent)
         {
             if (trimmed.TrimStart().StartsWith("#"))
                 return new List<Node> { new TextNode(trimmed) };
@@ -299,7 +304,7 @@ namespace PyBlocksViewer
             string code = StripComment(trimmed);
             string rest = trimmed.Substring(code.Length); // whitespace + "#..." if any, else ""
  
-            var nodes = TokenizeCodeLine(code.TrimEnd());
+            var nodes = TokenizeCodeLine(code.TrimEnd(), indent);
             string trailingWs = code.Substring(code.TrimEnd().Length); // whitespace eaten by TrimEnd, put back before the comment
             string comment = trailingWs + rest;
             if (comment.Length > 0) nodes.Add(new TextNode(comment));
@@ -351,7 +356,7 @@ namespace PyBlocksViewer
             "|(?<id>[A-Za-z_][A-Za-z0-9_]*)",
             RegexOptions.Compiled);
  
-        private static List<Node> TokenizeCodeLine(string code)
+        private static List<Node> TokenizeCodeLine(string code, int baseCol)
         {
             var nodes = new List<Node>();
             var plain = new StringBuilder();
@@ -369,7 +374,7 @@ namespace PyBlocksViewer
                 if (m.Groups["str"].Success || m.Groups["num"].Success)
                 {
                     FlushPlain();
-                    nodes.Add(new PillNode(m.Value, PillKind.Literal));
+                    nodes.Add(new PillNode(m.Value, PillKind.Literal) { StartCol = baseCol + m.Index, EndCol = baseCol + m.Index + m.Length });
                 }
                 else // identifier
                 {
@@ -383,7 +388,7 @@ namespace PyBlocksViewer
                     else
                     {
                         FlushPlain();
-                        nodes.Add(new PillNode(word, PillKind.Variable));
+                        nodes.Add(new PillNode(word, PillKind.Variable) { StartCol = baseCol + m.Index, EndCol = baseCol + m.Index + m.Length });
                     }
                 }
  
@@ -1569,7 +1574,7 @@ namespace PyBlocksViewer
             using (var gradientBrush = new LinearGradientBrush(bounds, lightFill, darkFill, LinearGradientMode.ForwardDiagonal))
                 g.FillPath(gradientBrush, path);
  
-            using (var borderPen = new Pen(Darken(fill, 0.42f), 1f))
+            using (var borderPen = new Pen(Darken(fill, 0.55f), 1.5f))
                 g.DrawPath(borderPen, path);
         }
  
@@ -2373,7 +2378,7 @@ namespace PyBlocksViewer
             Height = (int)Math.Ceiling(naturalH) + 12;
             Margin = new Padding(6, 4, 6, 4);
             Cursor = Cursors.Hand;
-            BackColor = Color.White;
+            BackColor = ColorTranslator.FromHtml("#E6E6E8");
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
         }
  
@@ -2455,10 +2460,11 @@ namespace PyBlocksViewer
             using var path = Renderer.RoundedRectPath(rect.X, rect.Y, rect.Width, rect.Height, 4f);
  
             Color top = Renderer.Lighten(_color, 0.10f);
-            using (var grad = new LinearGradientBrush(rect, top, Color.Black, LinearGradientMode.Vertical))
+            Color bottom = Renderer.Darken(_color, 0.55f); // dark shade of the category color, not pure black
+            using (var grad = new LinearGradientBrush(rect, top, bottom, LinearGradientMode.Vertical))
                 g.FillPath(grad, path);
  
-            using (var pen = new Pen(Color.Black, Selected ? 2f : 1f))
+            using (var pen = new Pen(Renderer.Darken(_color, 0.6f), Selected ? 2f : 1f))
                 g.DrawPath(pen, path);
  
             const float iconSize = 14f;
@@ -2504,10 +2510,10 @@ namespace PyBlocksViewer
             var rect = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
             using var path = Renderer.RoundedRectPath(rect.X, rect.Y, rect.Width, rect.Height, 4f);
  
-            Color darkGrey = Color.FromArgb(128, 128, 128);
-            using (var brush = new SolidBrush(darkGrey))
+            Color grey = ColorTranslator.FromHtml("#808080");
+            using (var brush = new SolidBrush(grey))
                 g.FillPath(brush, path);
-            using (var pen = new Pen(Color.FromArgb(40, 40, 40), 1f))
+            using (var pen = new Pen(Color.FromArgb(60, 60, 60), 1f))
                 g.DrawPath(pen, path);
  
             using var textBrush = new SolidBrush(Color.White);
@@ -2527,9 +2533,11 @@ namespace PyBlocksViewer
         public PalettePanel()
         {
             Dock = DockStyle.Fill;
-            BackColor = ColorTranslator.FromHtml("#FFFFFF");
+            BackColor = ColorTranslator.FromHtml("#E6E6E8");
  
-            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = Color.Transparent };
+            Color panelBg = ColorTranslator.FromHtml("#E6E6E8");
+ 
+            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = panelBg };
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -2543,6 +2551,7 @@ namespace PyBlocksViewer
                 Height = 28,
                 Font = AppAssets.UiFont(10.5f, FontStyle.Bold),
                 Padding = new Padding(8, 6, 0, 0),
+                BackColor = panelBg,
             };
             root.Controls.Add(title, 0, 0);
  
@@ -2555,6 +2564,7 @@ namespace PyBlocksViewer
                 FlowDirection = FlowDirection.LeftToRight,
                 WrapContents = true,
                 Padding = new Padding(8, 6, 8, 0),
+                BackColor = panelBg,
             };
             foreach (var (key, display) in PaletteCatalog.Categories)
             {
@@ -2568,16 +2578,16 @@ namespace PyBlocksViewer
             root.Controls.Add(catFlow, 0, 1);
  
             // ---- search bar, below the category grid ----
-            var searchWrap = new Panel { Dock = DockStyle.Top, Height = 32, Padding = new Padding(8, 2, 8, 6) };
+            var searchWrap = new Panel { Dock = DockStyle.Top, Height = 32, Padding = new Padding(8, 2, 8, 6), BackColor = panelBg };
             _search = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "Search blocks..." };
             _search.TextChanged += (s, e) => RefreshList();
             searchWrap.Controls.Add(_search);
             root.Controls.Add(searchWrap, 0, 2);
  
-            var scrollHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Color.White, Padding = new Padding(0) };
+            var scrollHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = ColorTranslator.FromHtml("#E6E6E8"), Padding = new Padding(0) };
             _stencilFlow = new FlowLayoutPanel
             {
-                FlowDirection = FlowDirection.TopDown,
+                FlowDirection = FlowDirection.TopDown, // outer flow stays vertical, so sub-category bars are always full-width row breaks
                 WrapContents = false,
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -2598,6 +2608,18 @@ namespace PyBlocksViewer
             }
         }
  
+        private const int TileGroupWidth = 350; // wrap width for the horizontal tile grid
+ 
+        private static FlowLayoutPanel NewTileGroup() => new()
+        {
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = true,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MaximumSize = new Size(TileGroupWidth, 0), // 0 height = unbounded; width bound is what forces wrapping
+            BackColor = ColorTranslator.FromHtml("#E6E6E8"),
+        };
+ 
         private void RefreshList()
         {
             _stencilFlow.SuspendLayout();
@@ -2610,21 +2632,98 @@ namespace PyBlocksViewer
                 var matches = PaletteCatalog.Items.Where(i =>
                     i.Label.Contains(q, StringComparison.OrdinalIgnoreCase) ||
                     i.Template.Contains(q, StringComparison.OrdinalIgnoreCase));
+                var tileGroup = NewTileGroup();
                 foreach (var item in matches)
-                    _stencilFlow.Controls.Add(new StencilTile(item));
+                    tileGroup.Controls.Add(new StencilTile(item));
+                _stencilFlow.Controls.Add(tileGroup);
             }
             else
             {
                 var color = PyClassifier.CategoryColors.TryGetValue(_currentCategory, out var c) ? c : Color.Gray;
                 foreach (var group in PaletteCatalog.ForCategory(_currentCategory).GroupBy(i => i.SubCategory))
                 {
-                    _stencilFlow.Controls.Add(new SubCategoryBar(group.Key, color, 340));
+                    _stencilFlow.Controls.Add(new SubCategoryBar(group.Key, color, TileGroupWidth));
+                    var tileGroup = NewTileGroup();
                     foreach (var item in group)
-                        _stencilFlow.Controls.Add(new StencilTile(item));
+                        tileGroup.Controls.Add(new StencilTile(item));
+                    _stencilFlow.Controls.Add(tileGroup);
                 }
             }
  
             _stencilFlow.ResumeLayout();
+        }
+    }
+ 
+    /// <summary>
+    /// One button in the top 63px icon toolbar: a 24x24 icon (loaded from
+    /// base/icons/&lt;Label&gt;.png, same convention as the category icons) with
+    /// its label centered below it. Falls back to a plain empty square if the
+    /// icon file isn't there yet, so the button stays usable either way.
+    /// </summary>
+    internal sealed class ToolbarIconButton : Control
+    {
+        public readonly string Label;
+ 
+        public ToolbarIconButton(string label)
+        {
+            Label = label;
+            Width = 72;
+            Height = 63;
+            Cursor = Cursors.Hand;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+        }
+ 
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+ 
+            const float iconSize = 24f;
+            float iconX = (Width - iconSize) / 2f, iconY = 6f;
+ 
+            var img = AppAssets.Icon(Label);
+            if (img != null)
+            {
+                g.DrawImage(img, new RectangleF(iconX, iconY, iconSize, iconSize));
+            }
+            else
+            {
+                using var ph = new Pen(Color.FromArgb(150, 150, 150), 1f);
+                g.DrawRectangle(ph, iconX, iconY, iconSize, iconSize);
+            }
+ 
+            using var textBrush = new SolidBrush(Color.FromArgb(40, 40, 40));
+            using var font = AppAssets.UiFont(7.5f, FontStyle.Regular);
+            using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Near, Trimming = StringTrimming.EllipsisCharacter };
+            g.DrawString(Label, font, textBrush, new RectangleF(0, iconY + iconSize + 3f, Width, Height - iconY - iconSize - 4f), sf);
+        }
+    }
+ 
+    /// <summary>A minimal 22px tab strip, one tab for now - room to grow into more views later.</summary>
+    internal sealed class TabStrip : Control
+    {
+        public TabStrip()
+        {
+            Height = 22;
+            Dock = DockStyle.Top;
+            BackColor = Color.FromArgb(230, 230, 230);
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+        }
+ 
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            var rect = new RectangleF(4, 2, 90, 18);
+            using var path = Renderer.RoundedRectPath(rect.X, rect.Y, rect.Width, rect.Height, 4f);
+            using (var brush = new SolidBrush(Color.White))
+                g.FillPath(brush, path);
+            using (var pen = new Pen(Color.FromArgb(180, 180, 180), 1f))
+                g.DrawPath(pen, path);
+            using var textBrush = new SolidBrush(Color.FromArgb(40, 40, 40));
+            using var font = AppAssets.UiFont(7.75f, FontStyle.Bold);
+            using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            g.DrawString("EDITOR", font, textBrush, rect, sf);
         }
     }
  
@@ -2768,6 +2867,28 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             StartPosition = FormStartPosition.CenterScreen;
             Font = AppAssets.UiFont(9f);
  
+            // ---- top: 63px icon toolbar, then a 22px tab strip below it ----
+            var iconToolbar = new Panel { Dock = DockStyle.Top, Height = 63, BackColor = Color.FromArgb(240, 240, 240) };
+            var iconFlow = new FlowLayoutPanel { Dock = DockStyle.Left, AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Padding = new Padding(4, 0, 4, 0) };
+            iconToolbar.Controls.Add(iconFlow);
+ 
+            var btnNew = new ToolbarIconButton("Create New");
+            var btnSave = new ToolbarIconButton("Save");
+            var btnImport = new ToolbarIconButton("Import");
+            var btnSettings = new ToolbarIconButton("Settings");
+            var btnLogViewer = new ToolbarIconButton("Log Viewer");
+            var btnIssues = new ToolbarIconButton("Issues");
+            iconFlow.Controls.Add(btnNew);
+            iconFlow.Controls.Add(btnSave);
+            iconFlow.Controls.Add(btnImport);
+            iconFlow.Controls.Add(btnSettings);
+            iconFlow.Controls.Add(btnLogViewer);
+            iconFlow.Controls.Add(btnIssues);
+            Controls.Add(iconToolbar);
+ 
+            var tabStrip = new TabStrip();
+            Controls.Add(tabStrip);
+ 
             var outerSplit = new SplitContainer
             {
                 Dock = DockStyle.Fill,
@@ -2775,6 +2896,7 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
                 FixedPanel = FixedPanel.Panel1,
             };
             Controls.Add(outerSplit);
+            outerSplit.BringToFront();
  
             var palette = new PalettePanel();
             outerSplit.Panel1.Controls.Add(palette);
@@ -2851,9 +2973,42 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             };
             _canvas.BlockDropped += HandleBlockDropped;
  
+            btnNew.Click += (s, e) =>
+            {
+                if (MessageBox.Show(this, "Clear the current script and start a new one?", "Create New",
+                    MessageBoxButtons.OKCancel, MessageBoxIcon.Question) == DialogResult.OK)
+                {
+                    _input.Text = "#!/usr/bin/env python3\n";
+                    DoRender();
+                }
+            };
+            btnSave.Click += (s, e) =>
+            {
+                using var dlg = new SaveFileDialog { Filter = "Python file (*.py)|*.py|All files (*.*)|*.*", FileName = "script.py" };
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    File.WriteAllText(dlg.FileName, _input.Text);
+                    _status.Text = "Saved: " + dlg.FileName;
+                }
+            };
+            btnImport.Click += (s, e) =>
+            {
+                using var dlg = new OpenFileDialog { Filter = "Python file (*.py)|*.py|All files (*.*)|*.*" };
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    _input.Text = File.ReadAllText(dlg.FileName);
+                    DoRender();
+                    _input.ApplyHighlighting();
+                    _status.Text = "Imported: " + dlg.FileName;
+                }
+            };
+            btnSettings.Click += (s, e) => MessageBox.Show(this, "Settings aren't implemented yet.", "Settings", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            btnLogViewer.Click += (s, e) => MessageBox.Show(this, _status.Text.Length > 0 ? _status.Text : "(no log yet)", "Log Viewer", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            btnIssues.Click += (s, e) => MessageBox.Show(this, "No issues to report yet.", "Issues", MessageBoxButtons.OK, MessageBoxIcon.Information);
+ 
             Load += (s, e) =>
             {
-                rightSplit.SplitterDistance = Math.Max(150, rightSplit.Width - 300);
+                rightSplit.SplitterDistance = Math.Max(150, rightSplit.Width - 450);
                 DoRender();
                 _input.ApplyHighlighting();
             };

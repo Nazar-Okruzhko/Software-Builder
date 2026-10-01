@@ -36,6 +36,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Diagnostics;
 using System.Drawing.Text;
 using System.IO;
 using System.Linq;
@@ -708,16 +709,16 @@ namespace PyBlocksViewer
         {
             // ==================== LVL 1: FLOW ====================
             new("flow", "Execution", "pass", "pass"),
-            new("flow", "Execution", "return", "return value"),
-            new("flow", "Execution", "yield", "yield value"),
+            new("flow", "Execution", "return", "return \"\""),
+            new("flow", "Execution", "yield", "yield \"\""),
  
-            new("flow", "Conditions", "if", "if condition:", requiresBody: true),
-            new("flow", "Conditions", "elif", "elif condition:", requiresBody: true),
+            new("flow", "Conditions", "if", "if \"\":", requiresBody: true),
+            new("flow", "Conditions", "elif", "elif \"\":", requiresBody: true),
             new("flow", "Conditions", "else", "else:", requiresBody: true),
-            new("flow", "Conditions", "match", "match value:", requiresBody: true),
+            new("flow", "Conditions", "match", "match \"\":", requiresBody: true),
  
             new("flow", "Loops", "for", "for item in range(10):", requiresBody: true),
-            new("flow", "Loops", "while", "while condition:", requiresBody: true),
+            new("flow", "Loops", "while", "while \"\":", requiresBody: true),
             new("flow", "Loops", "break", "break"),
             new("flow", "Loops", "continue", "continue"),
  
@@ -729,10 +730,10 @@ namespace PyBlocksViewer
             new("flow", "Exceptions Flow", "try", "try:", requiresBody: true),
             new("flow", "Exceptions Flow", "except", "except Exception:", requiresBody: true),
             new("flow", "Exceptions Flow", "finally", "finally:", requiresBody: true),
-            new("flow", "Exceptions Flow", "raise", "raise Exception(\"error\")"),
+            new("flow", "Exceptions Flow", "raise", "raise Exception(\"\")"),
  
             // ==================== LVL 2: VARIABLES ====================
-            new("variables", "Assignment", "=", "x = value"),
+            new("variables", "Assignment", "=", "x = \"\""),
             new("variables", "Assignment", "+=", "x += 1"),
             new("variables", "Assignment", "-=", "x -= 1"),
             new("variables", "Assignment", "*=", "x *= 2"),
@@ -749,16 +750,16 @@ namespace PyBlocksViewer
             new("variables", "Constants", "False", "False"),
             new("variables", "Constants", "None", "None"),
  
-            new("variables", "Conversion", "int()", "int(value)"),
-            new("variables", "Conversion", "float()", "float(value)"),
-            new("variables", "Conversion", "str()", "str(value)"),
-            new("variables", "Conversion", "bool()", "bool(value)"),
+            new("variables", "Conversion", "int()", "int(\"\")"),
+            new("variables", "Conversion", "float()", "float(\"\")"),
+            new("variables", "Conversion", "str()", "str(\"\")"),
+            new("variables", "Conversion", "bool()", "bool(\"\")"),
  
             // ==================== LVL 3: FUNCTIONS ====================
             new("functions", "Definition", "def", "def my_function():", requiresBody: true),
             new("functions", "Definition", "lambda", "square = lambda x: x * x"),
  
-            new("functions", "Return", "return", "return value"),
+            new("functions", "Return", "return", "return \"\""),
  
             new("functions", "Parameters", "args (*args)", "def my_function(*args):", requiresBody: true),
             new("functions", "Parameters", "kwargs (**kwargs)", "def my_function(**kwargs):", requiresBody: true),
@@ -776,8 +777,8 @@ namespace PyBlocksViewer
             new("objects", "Classes", "self", "self.value = 0"),
             new("objects", "Classes", "__init__", "def __init__(self):", requiresBody: true),
  
-            new("objects", "Attributes", "getattr", "getattr(obj, \"name\")"),
-            new("objects", "Attributes", "setattr", "setattr(obj, \"name\", value)"),
+            new("objects", "Attributes", "getattr", "getattr(\"\", \"name\")"),
+            new("objects", "Attributes", "setattr", "setattr(\"\", \"name\", \"\")"),
  
             new("objects", "Methods", "instance method", "def method(self):", requiresBody: true),
             new("objects", "Methods", "class method", "def method(cls):", requiresBody: true),
@@ -789,8 +790,8 @@ namespace PyBlocksViewer
             // ==================== LVL 5: DATA ====================
             new("data", "Lists", "append()", "my_list.append(item)"),
             new("data", "Lists", "extend()", "my_list.extend(items)"),
-            new("data", "Lists", "insert()", "my_list.insert(0, item)"),
-            new("data", "Lists", "remove()", "my_list.remove(item)"),
+            new("data", "Lists", "insert()", "my_list.insert(0, \"\")"),
+            new("data", "Lists", "remove()", "my_list.remove(\"\")"),
             new("data", "Lists", "pop()", "my_list.pop()"),
             new("data", "Lists", "sort()", "my_list.sort()"),
             new("data", "Lists", "reverse()", "my_list.reverse()"),
@@ -798,12 +799,12 @@ namespace PyBlocksViewer
             new("data", "Dictionaries", "keys()", "my_dict.keys()"),
             new("data", "Dictionaries", "values()", "my_dict.values()"),
             new("data", "Dictionaries", "items()", "my_dict.items()"),
-            new("data", "Dictionaries", "get()", "my_dict.get(key)"),
+            new("data", "Dictionaries", "get()", "my_dict.get(\"\")"),
             new("data", "Dictionaries", "update()", "my_dict.update(other)"),
-            new("data", "Dictionaries", "pop()", "my_dict.pop(key)"),
+            new("data", "Dictionaries", "pop()", "my_dict.pop(\"\")"),
  
-            new("data", "Sets", "add()", "my_set.add(item)"),
-            new("data", "Sets", "remove()", "my_set.remove(item)"),
+            new("data", "Sets", "add()", "my_set.add(\"\")"),
+            new("data", "Sets", "remove()", "my_set.remove(\"\")"),
             new("data", "Sets", "union()", "my_set.union(other)"),
             new("data", "Sets", "intersection()", "my_set.intersection(other)"),
  
@@ -811,7 +812,7 @@ namespace PyBlocksViewer
             new("data", "Tuples", "unpacking", "a, b = my_tuple"),
  
             // ==================== LVL 6: TEXT ====================
-            new("text", "Creation", "str()", "text = str(value)"),
+            new("text", "Creation", "str()", "text = str(\"\")"),
             new("text", "Creation", "f-string", "text = f\"value: {x}\""),
  
             new("text", "Manipulation", "upper()", "text.upper()"),
@@ -825,7 +826,7 @@ namespace PyBlocksViewer
             new("text", "Search", "index()", "text.index(\"sub\")"),
             new("text", "Search", "startswith()", "text.startswith(\"a\")"),
             new("text", "Search", "endswith()", "text.endswith(\"z\")"),
-            new("text", "Search", "in", "if \"a\" in text:", requiresBody: true),
+            new("text", "Search", "in", "if \"\" in \"\":", requiresBody: true),
  
             new("text", "Formatting", "format()", "text.format(x)"),
             new("text", "Formatting", "f-string", "text = f\"{x:.2f}\""),
@@ -867,14 +868,14 @@ namespace PyBlocksViewer
             new("files", "Binary Files", "readbytes()", "data = f.read()"),
             new("files", "Binary Files", "writebytes()", "f.write(data)"),
  
-            new("files", "File System", "os.path.exists", "os.path.exists(path)"),
-            new("files", "File System", "os.remove", "os.remove(path)"),
-            new("files", "File System", "os.rename", "os.rename(old, new_name)"),
-            new("files", "File System", "os.listdir", "os.listdir(path)"),
+            new("files", "File System", "os.path.exists", "os.path.exists(\"\")"),
+            new("files", "File System", "os.remove", "os.remove(\"\")"),
+            new("files", "File System", "os.rename", "os.rename(\"\", \"\")"),
+            new("files", "File System", "os.listdir", "os.listdir(\"\")"),
  
             new("files", "Paths", "join()", "os.path.join(a, b)"),
-            new("files", "Paths", "split()", "os.path.split(path)"),
-            new("files", "Paths", "basename()", "os.path.basename(path)"),
+            new("files", "Paths", "split()", "os.path.split(\"\")"),
+            new("files", "Paths", "basename()", "os.path.basename(\"\")"),
  
             // ==================== LVL 9: UI ====================
             new("ui", "Window", "create window", "window = Window()"),
@@ -911,7 +912,7 @@ namespace PyBlocksViewer
             new("system", "Process", "exit()", "sys.exit()"),
             new("system", "Process", "argv", "args = sys.argv"),
  
-            new("system", "Clipboard", "copy", "clipboard.copy(text)"),
+            new("system", "Clipboard", "copy", "clipboard.copy(\"\")"),
             new("system", "Clipboard", "paste", "text = clipboard.paste()"),
  
             // ==================== LVL 12: ADVANCED ====================
@@ -921,14 +922,14 @@ namespace PyBlocksViewer
             new("advanced", "Async", "async", "async def handler():", requiresBody: true),
             new("advanced", "Async", "await", "await task()"),
  
-            new("advanced", "Generators", "yield", "yield value"),
+            new("advanced", "Generators", "yield", "yield \"\""),
  
             new("advanced", "Typing", "type hints", "x: int = 0"),
             new("advanced", "Typing", "Optional", "x: Optional[int] = None"),
             new("advanced", "Typing", "List[T]", "x: List[int] = []"),
  
-            new("advanced", "Reflection", "getattr", "getattr(obj, \"name\")"),
-            new("advanced", "Reflection", "setattr", "setattr(obj, \"name\", value)"),
+            new("advanced", "Reflection", "getattr", "getattr(\"\", \"name\")"),
+            new("advanced", "Reflection", "setattr", "setattr(\"\", \"name\", \"\")"),
             new("advanced", "Reflection", "hasattr", "hasattr(obj, \"name\")"),
  
             new("advanced", "Memory / Internals", "gc", "gc.collect()"),
@@ -1965,15 +1966,6 @@ namespace PyBlocksViewer
             // script genuinely reflows to make room, live, rather than just
             // showing a static overlay on top of the unchanged original.
             Renderer.DrawStack(Script, g, 0, 0);
- 
-            if (_preview.HasValue)
-            {
-                var d = _preview.Value;
-                using var pen = new Pen(Color.FromArgb(230, 40, 160, 40), 3f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-                g.DrawLine(pen, d.PreviewX, d.Y, d.PreviewX + d.PreviewW, d.Y);
-                using var dot = new SolidBrush(Color.FromArgb(230, 40, 160, 40));
-                g.FillEllipse(dot, d.PreviewX - 4f, d.Y - 4f, 8f, 8f);
-            }
         }
  
         /// <summary>Renders the whole script to a right-sized bitmap for PNG export.</summary>
@@ -2089,6 +2081,11 @@ namespace PyBlocksViewer
             float cx = e.X - (AutoScrollPosition.X + MarginX);
             float cy = e.Y - (AutoScrollPosition.Y + MarginY);
             _armedChain = HitTestChain(Script, 0f, 0, cx, cy);
+            if (_armedChain.HasValue)
+            {
+                var (hitStack, hitIndex) = _armedChain.Value;
+                if (Renderer.IsStarter(hitStack[hitIndex])) _armedChain = null;
+            }
             _mouseDownScreenPt = Cursor.Position;
             _armedForChainDrag = _armedChain.HasValue;
         }
@@ -2662,11 +2659,13 @@ namespace PyBlocksViewer
     /// </summary>
     internal sealed class ToolbarIconButton : Control
     {
-        public readonly string Label;
+        public readonly string Label;      // icon lookup key: base/icons/<Label>.png
+        public readonly string DisplayText;
  
-        public ToolbarIconButton(string label)
+        public ToolbarIconButton(string label, string? displayText = null)
         {
             Label = label;
+            DisplayText = displayText ?? label;
             Width = 72;
             Height = 63;
             Cursor = Cursors.Hand;
@@ -2695,7 +2694,7 @@ namespace PyBlocksViewer
             using var textBrush = new SolidBrush(Color.FromArgb(40, 40, 40));
             using var font = AppAssets.UiFont(7.5f, FontStyle.Regular);
             using var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Near, Trimming = StringTrimming.EllipsisCharacter };
-            g.DrawString(Label, font, textBrush, new RectangleF(0, iconY + iconSize + 3f, Width, Height - iconY - iconSize - 4f), sf);
+            g.DrawString(DisplayText, font, textBrush, new RectangleF(0, iconY + iconSize + 3f, Width, Height - iconY - iconSize - 4f), sf);
         }
     }
  
@@ -2877,13 +2876,13 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             var btnImport = new ToolbarIconButton("Import");
             var btnSettings = new ToolbarIconButton("Settings");
             var btnLogViewer = new ToolbarIconButton("Log Viewer");
-            var btnIssues = new ToolbarIconButton("Issues");
+            var btnRun = new ToolbarIconButton("Run", "Run...");
             iconFlow.Controls.Add(btnNew);
             iconFlow.Controls.Add(btnSave);
             iconFlow.Controls.Add(btnImport);
             iconFlow.Controls.Add(btnSettings);
             iconFlow.Controls.Add(btnLogViewer);
-            iconFlow.Controls.Add(btnIssues);
+            iconFlow.Controls.Add(btnRun);
             Controls.Add(iconToolbar);
  
             var tabStrip = new TabStrip();
@@ -3004,7 +3003,7 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             };
             btnSettings.Click += (s, e) => MessageBox.Show(this, "Settings aren't implemented yet.", "Settings", MessageBoxButtons.OK, MessageBoxIcon.Information);
             btnLogViewer.Click += (s, e) => MessageBox.Show(this, _status.Text.Length > 0 ? _status.Text : "(no log yet)", "Log Viewer", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            btnIssues.Click += (s, e) => MessageBox.Show(this, "No issues to report yet.", "Issues", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            btnRun.Click += (s, e) => RunScript();
  
             Load += (s, e) =>
             {
@@ -3062,6 +3061,41 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             using var bmp = _canvas.RenderToBitmap();
             bmp.Save(dlg.FileName, ImageFormat.Png);
             _status.Text = "Saved: " + dlg.FileName;
+        }
+ 
+        private static readonly string[] PythonCandidates = { "python", "py", "python3" };
+ 
+        /// <summary>
+        /// Saves the current source to a temp .py file and pops up a REAL,
+        /// visible console window running it (chaining python/py/python3
+        /// with || so whichever launcher actually exists on PATH is the one
+        /// that runs) - the console itself is the output, not a custom
+        /// dialog, and /k leaves it open afterward so results stay visible.
+        /// </summary>
+        private void RunScript()
+        {
+            try
+            {
+                string tempPath = Path.Combine(Path.GetTempPath(), "pyblocksviewer_" + Guid.NewGuid().ToString("N") + ".py");
+                File.WriteAllText(tempPath, _input.Text);
+ 
+                string quoted = "\"" + tempPath + "\"";
+                string chained = string.Join(" || ", PythonCandidates.Select(cmd => $"{cmd} {quoted}"));
+ 
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = "/k " + chained,
+                    UseShellExecute = true,
+                    WindowStyle = ProcessWindowStyle.Normal,
+                };
+                Process.Start(psi);
+                _status.Text = "Running " + tempPath + " in a console window...";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "Error running script: " + ex.Message, "Run", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
     }
 }

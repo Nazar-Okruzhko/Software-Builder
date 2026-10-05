@@ -1082,6 +1082,29 @@ namespace PyBlocksViewer
             return x;
         }
  
+        /// <summary>
+        /// Walks a header/continuation row's nodes with the EXACT same cursor
+        /// math as MeasureInlineRow/DrawInlineRow, returning whichever
+        /// PillNode's span contains targetX (relative to the row's own start
+        /// x), plus its own [x, x+w) span for building a screen rect. Used
+        /// for click/drag hit-testing on the canvas - never for drawing.
+        /// </summary>
+        public static (PillNode pill, float x, float w)? FindPillAt(List<Node> nodes, Graphics g, float targetX)
+        {
+            float x = 0;
+            bool first = true;
+            foreach (var n in nodes)
+            {
+                if (!first) x += PartGap;
+                first = false;
+                float w = MeasureNode(n, g);
+                if (n is PillNode pn && targetX >= x && targetX < x + w)
+                    return (pn, x, w);
+                x += w;
+            }
+            return null;
+        }
+ 
         private const float PillPadH = 7f; // horizontal padding inside a literal/variable pill (each side)
  
         private static float MeasureNode(Node n, Graphics g)
@@ -1114,19 +1137,26 @@ namespace PyBlocksViewer
         // =====================================================================
         // PASS 2: draw, using the cached sizes from Measure()
         // =====================================================================
-        public static void DrawStack(List<BlockNode> stack, Graphics g, float x, float y)
+        public static void DrawStack(List<BlockNode> stack, Graphics g, float x, float y, RectangleF? clip = null)
         {
             float curY = y;
             for (int i = 0; i < stack.Count; i++)
             {
                 var b = stack[i];
                 if (i > 0 && IsStarter(b)) curY += StarterGap;
-                DrawBlock(b, g, x, curY);
+ 
+                // Entirely outside the visible area -> skip the (relatively
+                // expensive) fill/stroke/text work, but Y bookkeeping below
+                // still uses the cached b.H so later siblings stay correctly
+                // positioned without needing to recurse into this subtree.
+                if (!clip.HasValue || (curY + b.H >= clip.Value.Top && curY <= clip.Value.Bottom))
+                    DrawBlock(b, g, x, curY, clip);
+ 
                 curY += b.H;
             }
         }
  
-        private static void DrawBlock(BlockNode b, Graphics g, float x, float y)
+        private static void DrawBlock(BlockNode b, Graphics g, float x, float y, RectangleF? clip)
         {
             var fill = PyClassifier.CategoryColors.TryGetValue(b.Category, out var c) ? c : PyClassifier.CategoryColors["grey"];
             Color? textColor = b.TextColorOverride;
@@ -1152,12 +1182,12 @@ namespace PyBlocksViewer
                     break;
  
                 case BlockShape.CBlock:
-                    DrawCBlock(b, g, x, y, fill);
+                    DrawCBlock(b, g, x, y, fill, clip);
                     break;
             }
         }
  
-        private static void DrawCBlock(BlockNode b, Graphics g, float x, float y, Color fill)
+        private static void DrawCBlock(BlockNode b, Graphics g, float x, float y, Color fill, RectangleF? clip)
         {
             Color? textColor = b.TextColorOverride;
             float textX = x + PadX;
@@ -1180,7 +1210,7 @@ namespace PyBlocksViewer
             for (int m = 0; m < b.Mouths.Count; m++)
             {
                 float mh = b.MouthH[m];
-                DrawStack(b.Mouths[m], g, x + Indent, cursorY);
+                DrawStack(b.Mouths[m], g, x + Indent, cursorY, clip);
                 cursorY += mh;
  
                 // continuation divider bar (elif / else / except / finally), if any
@@ -1959,13 +1989,22 @@ namespace PyBlocksViewer
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-            g.TranslateTransform(AutoScrollPosition.X + MarginX, AutoScrollPosition.Y + MarginY);
+ 
+            float dx = AutoScrollPosition.X + MarginX, dy = AutoScrollPosition.Y + MarginY;
+            g.TranslateTransform(dx, dy);
+ 
+            // Convert the invalidated/visible rect into content coordinates so
+            // DrawStack can skip the fill/stroke work for anything scrolled
+            // out of view - meaningfully cheaper during scrolling on bigger
+            // scripts, since only a handful of rows are ever actually drawn.
+            var clip = e.ClipRectangle;
+            var contentClip = new RectangleF(clip.X - dx, clip.Y - dy, clip.Width, clip.Height);
  
             // While dragging, Script has ALREADY been swapped (see OnDragOver)
             // for the real would-be result of the drop - the rest of the
             // script genuinely reflows to make room, live, rather than just
             // showing a static overlay on top of the unchanged original.
-            Renderer.DrawStack(Script, g, 0, 0);
+            Renderer.DrawStack(Script, g, 0, 0, contentClip);
         }
  
         /// <summary>Renders the whole script to a right-sized bitmap for PNG export.</summary>
@@ -2883,10 +2922,11 @@ print(f""Total: {total}, Average: {average:.2f}, Highest: {highest}"")";
             iconFlow.Controls.Add(btnSettings);
             iconFlow.Controls.Add(btnLogViewer);
             iconFlow.Controls.Add(btnRun);
-            Controls.Add(iconToolbar);
  
             var tabStrip = new TabStrip();
             Controls.Add(tabStrip);
+            Controls.Add(iconToolbar);
+            iconToolbar.BringToFront();
  
             var outerSplit = new SplitContainer
             {
